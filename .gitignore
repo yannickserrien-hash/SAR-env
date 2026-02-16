@@ -1,0 +1,13 @@
+/marble
+venv/
+build/
+beliefs/
+__pycache__/
+*.py[cod]
+*$py.class
+logs/
+.vscode/
+.idea/
+.env
+.DS_Store
+CLAUDE.md
