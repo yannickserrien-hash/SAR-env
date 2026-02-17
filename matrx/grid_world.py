@@ -244,18 +244,19 @@ class GridWorld:
                 gevent.sleep(1)
             else:
                 is_done, tick_duration = self.__step()
-                #TODO
 
             if self.__run_matrx_api and api._matrx_done:
                 print("Scenario stopped through api")
                 break
 
-    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=100):
+###### PLANNER RUN
+    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=600):
         """
-        Run GridWorld with MARBLE-style decentralized planning loop.
+        Run GridWorld with MARBLE-style planning loop.
 
-        Outer loop: EnginePlanner assigns tasks every N ticks via LLM.
-        Inner loop: Standard MATRX __step() loop for N ticks.
+        A single continuous tick loop runs __step() every iteration.
+        Planning and summarization happen in background threads — the
+        simulation NEVER blocks on LLM calls.
 
         Parameters
         ----------
@@ -266,7 +267,7 @@ class GridWorld:
         agents : list
             List of RescueAgent brain instances (AI agents only, no human).
         ticks_per_iteration : int
-            Number of MATRX ticks per planning iteration.
+            Number of MATRX ticks per planning iteration (default 600 = 1 min).
         """
         from engine.iteration_data import IterationData
         from matrx.messages.message import Message
@@ -277,90 +278,135 @@ class GridWorld:
         if self.__verbose:
             print(f"@{os.path.basename(__file__)}: Starting game loop with planner...")
 
+        # Phase constants for the state machine
+        NEEDS_PLANNING = 'needs_planning'
+        PLANNING_IN_PROGRESS = 'planning_in_progress'
+        EXECUTING = 'executing'
+        NEEDS_SUMMARIZATION = 'needs_summarization'
+        SUMMARIZING = 'summarizing'
+
         iteration = 0
         is_done = False
+        ticks_in_iteration = 0
+        phase = NEEDS_PLANNING
+        planning_future = None
+        summary_future = None
+        iteration_data = None
 
         while not is_done and iteration < planner.max_iterations:
-            print(f"\n{'='*60}")
-            print(f"[GridWorld] Planning iteration {iteration}")
-            print(f"{'='*60}")
 
-            iteration_data = IterationData(iteration=iteration)
+            # Handle pause
+            if self.__run_matrx_api and api.matrx_paused:
+                gevent.sleep(0.1)
+                continue
 
-            # ----- PLANNING PHASE -----
-            # Serialize world state for the LLM
-            world_state = self.__get_complete_state()
-            world_state_summary = self._serialize_state_for_llm(world_state)
+            # --- Phase transitions (non-blocking, checked before each tick) ---
 
-            # EnginePlanner generates tasks via LLM
-            task_assignments = planner.generate_tasks(world_state_summary, agents)
-            iteration_data.task_assignments = task_assignments
+            if phase == NEEDS_PLANNING:
+                print(f"\n{'='*60}")
+                print(f"[GridWorld] Planning iteration {iteration}")
+                print(f"{'='*60}")
 
-            print(f"[GridWorld] Tasks: rescuebot='{task_assignments.get('rescuebot_task', '?')}' "
-                  f"human='{task_assignments.get('human_task', '?')}'")
+                iteration_data = IterationData(iteration=iteration)
+                ticks_in_iteration = 0
 
-            # Distribute tasks to AI agents
-            rescuebot_task = task_assignments.get('rescuebot_task', 'explore')
-            for agent in agents:
-                if hasattr(agent, 'set_current_task'):
-                    agent.set_current_task(rescuebot_task)
+                # Submit planning to background thread (returns Future immediately)
+                world_state = self.__get_complete_state()
+                ws_summary = self._serialize_state_for_llm(world_state)
+                
+                planning_future = planner.submit_generate_tasks(ws_summary, agents)
+                phase = PLANNING_IN_PROGRESS
 
-            # Send human's suggested task as a MATRX message
-            human_task = task_assignments.get('human_task', '')
-            if human_task:
-                self._send_planner_message_to_human(human_task, agents)
+            if phase == PLANNING_IN_PROGRESS and planning_future is not None: # assign tasks
+                if planning_future.done():
+                    try:
+                        task_assignments = planning_future.result()
+                    except Exception as e:
+                        print(f"[GridWorld] Planning error: {e}")
+                        task_assignments = {
+                            'rescuebot_task': 'explore nearest unexplored area',
+                            'human_task': 'Please explore areas and rescue victims',
+                            'reasoning': 'Fallback: planning error'
+                        }
+                    planning_future = None
+                    iteration_data.task_assignments = task_assignments
 
-            # Record task results for this iteration
-            for agent in agents:
-                iteration_data.task_results.append({
-                    'agent_id': getattr(agent, 'agent_id', 'rescuebot'),
-                    'task': rescuebot_task,
-                    'result': {'status': 'executing'}
-                })
+                    print(f"[GridWorld] Tasks: rescuebot='{task_assignments.get('rescuebot_task', '?')}' "
+                          f"human='{task_assignments.get('human_task', '?')}'")
 
-            # ----- EXECUTION PHASE (N ticks of standard MATRX) -----
-            ticks_executed = 0
-            for tick in range(ticks_per_iteration):
-                if self.__run_matrx_api and api.matrx_paused:
-                    gevent.sleep(0.1)
-                    continue  # Don't count paused ticks
+                    # Distribute tasks to AI agents
+                    rescuebot_task = task_assignments.get('rescuebot_task', 'explore')
+                    for agent in agents:
+                        if hasattr(agent, 'set_current_task'):
+                            agent.set_current_task(rescuebot_task)
 
-                is_done, tick_duration = self.__step()
+                    # Send human's suggested task as a MATRX message
+                    human_task = task_assignments.get('human_task', '')
+                    if human_task:
+                        self._send_planner_message_to_human(human_task, agents)
 
-                ticks_executed += 1
+                    # Record initial task results
+                    for agent in agents:
+                        iteration_data.task_results.append({
+                            'agent_id': getattr(agent, 'agent_id', 'rescuebot'),
+                            'task': rescuebot_task,
+                            'result': {'status': 'executing'}
+                        })
 
-                if self.__run_matrx_api and api._matrx_done:
-                    is_done = True
-                    break
+                    phase = EXECUTING
 
-                if is_done:
-                    break
+            if phase == NEEDS_SUMMARIZATION:
+                # Update task results
+                for result in iteration_data.task_results:
+                    result['result'] = {
+                        'status': 'completed' if is_done else 'ticks_exhausted',
+                        'ticks_executed': ticks_in_iteration
+                    }
 
-            # Update task results with execution info
-            for result in iteration_data.task_results:
-                result['result'] = {
-                    'status': 'completed' if is_done else 'ticks_exhausted',
-                    'ticks_executed': ticks_executed
-                }
+                # Submit summarization to background thread
+                world_state = self.__get_complete_state()
+                ws_summary = self._serialize_state_for_llm(world_state)
+                summary_future = planner.submit_summarize(iteration_data, ws_summary)
+                phase = SUMMARIZING
 
-            # ----- SUMMARIZATION PHASE -----
-            world_state = self.__get_complete_state()
-            world_state_summary = self._serialize_state_for_llm(world_state)
-            summary = planner.summarize_output(iteration_data, world_state_summary)
-            iteration_data.summary = summary
-            print(f"[GridWorld] Iteration {iteration} summary: {summary[:200]}")
+            if phase == SUMMARIZING and summary_future is not None:
+                if summary_future.done():
+                    try:
+                        summary = summary_future.result()
+                    except Exception as e:
+                        print(f"[GridWorld] Summary error: {e}")
+                        summary = "Summary unavailable"
+                    summary_future = None
+                    iteration_data.summary = summary
+                    print(f"[GridWorld] Iteration {iteration} summary: {summary[:200]}")
 
-            # ----- TERMINATION CHECK -----
-            should_continue = planner.decide_next_step(iteration_data)
-            iteration_data.continue_simulation = should_continue
-            planner.iteration_history.append(iteration_data)
+                    # Termination check
+                    should_continue = planner.decide_next_step(iteration_data)
+                    iteration_data.continue_simulation = should_continue
+                    planner.iteration_history.append(iteration_data)
 
-            if not should_continue or is_done:
-                print(f"[GridWorld] Stopping at iteration {iteration}")
+                    if not should_continue or is_done:
+                        print(f"[GridWorld] Stopping at iteration {iteration}")
+                        break
+
+                    planner.update_progress(iteration_data)
+                    iteration += 1
+                    phase = NEEDS_PLANNING
+                    continue  # Start next iteration without executing a tick
+
+            # --- Execute one tick (always runs, regardless of phase) ---
+            is_done, tick_duration = self.__step()
+            ticks_in_iteration += 1
+
+            if self.__run_matrx_api and api._matrx_done:
+                is_done = True
+
+            if is_done:
                 break
 
-            planner.update_progress(iteration_data)
-            iteration += 1
+            # Check if iteration ticks exhausted
+            if phase == EXECUTING and ticks_in_iteration >= ticks_per_iteration:
+                phase = NEEDS_SUMMARIZATION
 
         return planner.iteration_history
 
@@ -377,24 +423,24 @@ class GridWorld:
                 summary_parts.append(f"Tick: {obj_data.get('nr_ticks', 0)}")
                 continue
 
+            if obj_id == 'rescuebot':
+                summary_parts.append(f"Agent rescuebot (LLM-based) at {world_state[obj_id]['location']}{world_state[obj_id].get('is_carrying', [])}")
+
+            if obj_id == 'ale': # TODO update agent summary
+                summary_parts.append(f"Agent ale (human controlled) at {world_state[obj_id]['location']}{world_state[obj_id].get('is_carrying', [])}")
+
             if not isinstance(obj_data, dict):
                 continue
 
             name = obj_data.get('name', obj_id)
+            if name == 'street':
+                continue
             location = obj_data.get('location', 'unknown')
             class_chain = str(obj_data.get('class_inheritance', []))
             img_name = str(obj_data.get('img_name', ''))
 
-            # Agents
-            if 'AgentBody' in class_chain:
-                is_human = obj_data.get('is_human_agent', False)
-                agent_type = 'Human' if is_human else 'AI'
-                carrying = obj_data.get('is_carrying', [])
-                carry_info = f", carrying {len(carrying)} items" if carrying else ""
-                summary_parts.append(f"Agent '{name}' ({agent_type}) at {location}{carry_info}")
-
             # Victims (collectable blocks)
-            elif obj_data.get('is_collectable', False):
+            if obj_data.get('is_collectable', False):
                 victim_type = 'unknown'
                 if 'critical' in img_name.lower():
                     victim_type = 'critically injured'
@@ -413,9 +459,12 @@ class GridWorld:
                 is_open = obj_data.get('is_open', True)
                 if not is_open:
                     summary_parts.append(f"Closed door '{name}' at {location}")
-
+                else:
+                    summary_parts.append(f"Open door '{name}' at {location}")
+        # print("\n".join(summary_parts))
         return "\n".join(summary_parts) if summary_parts else "No relevant objects visible"
 
+#### HELPER
     def _send_planner_message_to_human(self, task_msg, agents):
         """Send the planner's suggested task to the human agent via MATRX messaging."""
         from matrx.messages.message import Message
@@ -423,8 +472,8 @@ class GridWorld:
         for agent in agents:
             if hasattr(agent, 'send_message'):
                 msg = Message(
-                    content=f"[Plan] Suggested task for you: {task_msg}",
-                    from_id='RescueBot'
+                    content=f"Suggested task for you: {task_msg}",
+                    from_id='Planner'
                 )
                 agent.send_message(msg)
                 break
@@ -790,7 +839,6 @@ class GridWorld:
                             f"occupied by intraversable object {intraversable_objs} at location {obj_loc}")
 
     def __step(self):
-
         # Set tick start of current tick
         start_time_current_tick = datetime.datetime.now()
 
@@ -841,7 +889,6 @@ class GridWorld:
         # duration!!)
         action_buffer = OrderedDict()
         for agent_id, agent_obj in self.__registered_agents.items():
-
             state = self.__get_agent_state(agent_obj)
 
             # check if this agent is busy performing an action , if so then also check if it as its last tick of waiting
@@ -849,7 +896,7 @@ class GridWorld:
             if agent_obj._check_agent_busy(curr_tick=self.__current_nr_ticks):
 
                 # only do the filter observation method to be able to update the agent's state to the api
-                filtered_agent_state = agent_obj.filter_observations(state)
+                filtered_agent_state = agent_obj.filter_observations(state) # This only shows the object 1 block away
 
                 # save the current agent's state for the api
                 if self.__run_matrx_api:
@@ -858,7 +905,6 @@ class GridWorld:
                                    world_settings=world_state['World'])
 
             else:  # agent is not busy
-
                 # Any received data from the api for this HumanAgent is send along to the get_action function
                 if agent_obj.is_human_agent:
                     usrinp = None
@@ -969,7 +1015,6 @@ class GridWorld:
         tick_end_time = datetime.datetime.now()
         tick_duration = tick_end_time - start_time_current_tick
         self.sleep_duration = self.__tick_duration - tick_duration.total_seconds()
-
         # Sleep for the remaining time of self.__tick_duration
         self.__sleep()
 
