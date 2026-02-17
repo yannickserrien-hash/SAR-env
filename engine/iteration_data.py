@@ -23,6 +23,4 @@ class IterationData:
     summary: str = ""  # Aggregated summary of iteration
     continue_simulation: bool = True  # Whether to continue to next iteration
     communications: List[str] = field(default_factory=list)  # Inter-agent messages
-    agent_kpis: Dict[str, Any] = field(default_factory=dict)  # Agent performance metrics
     score: float = 0.0  # Current simulation score
-    block_hit_rate: float = 0.0  # Fraction of victims rescued (termination metric)

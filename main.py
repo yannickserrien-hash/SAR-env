@@ -14,7 +14,7 @@ if __name__ == "__main__":
     condition = "normal"
     name = "ale"
     agent_type = 'llm'
-    ticks_per_iteration = 100  # Configurable: MATRX ticks per planning iteration
+    ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
 
     builder, agents = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld

@@ -7,6 +7,8 @@ Supports Ollama (local) via HTTP API at http://localhost:11434.
 import json
 import re
 import logging
+import threading
+import concurrent.futures
 import requests
 from typing import Optional
 
@@ -14,13 +16,20 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 
 logger = logging.getLogger('llm_utils')
 
+# Module-level thread pool shared by all async LLM callers.
+# 4 workers is sufficient for 2–3 concurrent calls (RescueAgent + EnginePlanner).
+_llm_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix='llm_worker'
+)
+
 
 def query_llm(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 512,
-    temperature: float = 0.7
+    max_tokens: int = 1000,
+    temperature: float = 0.1
 ) -> Optional[str]:
     """
     Query an LLM via Ollama's chat API.
@@ -63,6 +72,33 @@ def query_llm(
     except Exception as e:
         logger.error("LLM query failed: %s", e)
         return None
+
+
+def query_llm_async(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 1000,
+    temperature: float = 0.1
+) -> concurrent.futures.Future:
+    """
+    Submit an LLM query to the background thread pool and return immediately.
+
+    Returns a concurrent.futures.Future whose result is Optional[str]
+    (same type as query_llm). Callers poll future.done() each tick and
+    retrieve the result with future.result() once it is ready.
+
+    This function NEVER blocks — the requests.post call runs in a daemon
+    thread managed by _llm_executor.
+    """
+    return _llm_executor.submit(
+        query_llm,
+        model,
+        system_prompt,
+        user_prompt,
+        max_tokens,
+        temperature
+    )
 
 
 def parse_json_response(text: str) -> Optional[dict]:
