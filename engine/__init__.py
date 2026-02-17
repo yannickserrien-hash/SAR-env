@@ -8,4 +8,4 @@ decentralized multi-agent planning.
 from engine.engine_planner import EnginePlanner
 from engine.iteration_data import IterationData
 
-__all__ = ['Engine', 'EnginePlanner', 'IterationData']
+__all__ = ['EnginePlanner', 'IterationData']

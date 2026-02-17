@@ -3,28 +3,31 @@ EnginePlanner: Coordinates multi-agent task planning and termination decisions.
 
 Based on MARBLE's EnginePlanner pattern, adapted for MATRX simulation.
 Uses an LLM (via Ollama) to generate task assignments and summarize results.
+
+LLM calls are non-blocking: each call is dispatched to a background thread via
+concurrent.futures.ThreadPoolExecutor. The planner uses a prefetch strategy —
+the next iteration's tasks are generated in the background while the current
+iteration's ticks are running, so submit_generate_tasks() returns almost
+instantly for every iteration after the first.
 """
 
 import json
 import logging
-from typing import List, Dict, Any
+import os
+import concurrent.futures
+from typing import List, Dict, Any, Optional
+
+import yaml
+
 from engine.iteration_data import IterationData
 from engine.llm_utils import query_llm, parse_json_response
 
-# TODO: Customize this task description based on your project needs.
-# This is sent to the LLM as context for generating task assignments.
-DEFAULT_TASK_DESCRIPTION = (
-    "You are coordinating a search and rescue mission in a 25x24 grid world. "
-    "There are 14 areas (rooms) that may contain victims. Victims must be found "
-    "and carried to the drop-off zone at x=23, y=8-15. "
-    "There are 8 target victims: 4 critically injured (+6 pts each) and "
-    "4 mildly injured (+3 pts each). "
-    "Critically injured victims require BOTH agents to carry together. "
-    "Mildly injured victims can be carried by one agent alone. "
-    "Obstacles include: trees (RescueBot removes alone), small stones "
-    "(either agent removes alone), and big rocks (require both agents). "
-    "The human agent is controlled via keyboard and acts independently."
-)
+# Load all LLM prompts from the companion YAML file (once at import time).
+_PROMPTS_FILE = os.path.join(os.path.dirname(__file__), 'prompts_engine_planner.yaml')
+with open(_PROMPTS_FILE, 'r') as _f:
+    PROMPTS = yaml.safe_load(_f)
+
+DEFAULT_TASK_DESCRIPTION = PROMPTS['default_task_description'].strip()
 
 
 class EnginePlanner:
@@ -32,8 +35,8 @@ class EnginePlanner:
     Coordinates multi-agent task planning and termination decisions.
 
     Responsibilities:
-    - Generate task assignments via LLM
-    - Summarize iteration results via LLM
+    - Generate task assignments via LLM (async, prefetched)
+    - Summarize iteration results via LLM (async, background)
     - Check termination conditions (block_hit_rate, max_iterations)
     - Track iteration history
     """
@@ -65,54 +68,45 @@ class EnginePlanner:
         self.logger = logging.getLogger('EnginePlanner')
         self._last_summary = ""
 
-    def generate_tasks(self, world_state_summary: str, agents: list) -> Dict[str, str]:
+        # Background thread pool for async LLM calls (3 workers: planner + summarizer + prefetch)
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix='planner_worker'
+        )
+        # Prefetched task-generation future for the NEXT iteration.
+        # Populated at the end of each iteration by submit_summarize().
+        self._prefetch_future: Optional[concurrent.futures.Future] = None
+        # Cached agent list so prefetch submissions don't need a caller-supplied list.
+        self._agents_cache: list = []
+
+    # ------------------------------------------------------------------
+    # Private synchronous cores (run inside background threads)
+    # ------------------------------------------------------------------
+
+    def _generate_tasks_sync(self, world_state_summary: str, agents: list) -> Dict[str, str]:
         """
-        Use LLM to generate subtask assignments for agents.
-
-        Args:
-            world_state_summary: Text description of current world state
-            agents: List of RescueAgent brain instances
-
-        Returns:
-            Dict with 'rescuebot_task', 'human_task', and 'reasoning' keys
+        Synchronous core of task generation — called inside a background thread.
         """
         num_agents = len(agents)
 
-        system_prompt = (
-            "You are the planning coordinator for a search and rescue mission. "
-            "You assign high-level subtasks to agents based on the current situation. "
-            "Always respond with valid JSON only, no other text."
+        system_prompt = PROMPTS['generate_tasks_system'].format(
+            num_agents=num_agents
         )
-
-        user_prompt = f"""## Mission Description
-{self.task_description}
-
-## Current World State
-{world_state_summary}
-
-## Available Agents
-- RescueBot (AI agent, count: {num_agents}): Can explore areas, carry mildly injured victims alone, remove trees and small stones alone, cooperate with human for critical victims and big rocks.
-- Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them.
-
-## Previous Iteration Summary
-{self._last_summary if self._last_summary else "This is the first iteration."}
-
-## Instructions
-Assign the next high-level subtask to each agent. Consider what areas might have been explored, what victims may have been found, and what obstacles might remain.
-
-Respond in JSON format:
-{{
-  "rescuebot_task": "description of RescueBot's next subtask",
-  "human_task": "suggested task for human (sent as chat message)",
-  "reasoning": "brief explanation of your plan"
-}}"""
+        user_prompt = PROMPTS['generate_tasks_user'].format(
+            task_description=self.task_description,
+            world_state_summary=world_state_summary,
+            num_agents=num_agents,
+            previous_summary=(
+                self._last_summary if self._last_summary
+                else "This is the first iteration."
+            ),
+        )
 
         response = query_llm(
             model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=300,
-            temperature=0.7
+            max_tokens=1000,
+            temperature=0.2
         )
 
         result = parse_json_response(response)
@@ -128,17 +122,10 @@ Respond in JSON format:
             'reasoning': 'Fallback: LLM unavailable'
         }
 
-    def summarize_output(self, iteration_data: IterationData,
-                         world_state_summary: str = '') -> str:
+    def _summarize_sync(self, iteration_data: IterationData,
+                        world_state_summary: str) -> str:
         """
-        Use LLM to summarize what happened in this iteration.
-
-        Args:
-            iteration_data: Current iteration data
-            world_state_summary: Text description of current world state
-
-        Returns:
-            Summary string
+        Synchronous core of iteration summarization — called inside a background thread.
         """
         # Read current score data
         score_info = ""
@@ -164,24 +151,13 @@ Respond in JSON format:
         if not task_results_text:
             task_results_text = "No task results recorded this iteration."
 
-        system_prompt = (
-            "You are summarizing the results of one planning iteration in a "
-            "search and rescue simulation. Be concise (under 100 words)."
+        system_prompt = PROMPTS['summarize_system'].strip()
+        user_prompt = PROMPTS['summarize_user'].format(
+            task_assignments_json=json.dumps(iteration_data.task_assignments, indent=2),
+            task_results_text=task_results_text,
+            world_state_summary=world_state_summary,
+            score_info=score_info,
         )
-
-        user_prompt = f"""## Task Assignments This Iteration
-{json.dumps(iteration_data.task_assignments, indent=2)}
-
-## Task Results
-{task_results_text}
-
-## Current World State
-{world_state_summary}
-
-## Score
-{score_info}
-
-Provide a concise summary of what happened and what remains to be done."""
 
         response = query_llm(
             model=self.llm_model,
@@ -192,20 +168,87 @@ Provide a concise summary of what happened and what remains to be done."""
         )
 
         if response:
-            self._last_summary = response
             return response
 
         # Fallback: simple concatenation
-        parts = []
-        for result in iteration_data.task_results:
-            parts.append(
-                f"{result.get('agent_id', '?')}: "
-                f"{result.get('task', '?')} -> "
-                f"{result.get('result', {}).get('status', '?')}"
-            )
-        fallback = "; ".join(parts) if parts else "No results"
-        self._last_summary = fallback
-        return fallback
+        parts = [
+            f"{r.get('agent_id', '?')}: "
+            f"{r.get('task', '?')} -> "
+            f"{r.get('result', {}).get('status', '?')}"
+            for r in iteration_data.task_results
+        ]
+        return "; ".join(parts) if parts else "No results"
+
+    # ------------------------------------------------------------------
+    # Non-blocking API (returns Futures, never blocks the caller)
+    # ------------------------------------------------------------------
+
+    def submit_generate_tasks(self, world_state_summary: str,
+                              agents: list) -> concurrent.futures.Future:
+        """
+        Submit task generation to a background thread. Returns a Future immediately.
+
+        Never blocks the caller. The caller polls the returned Future
+        via .done() and retrieves the result when ready.
+        """
+        if agents:
+            self._agents_cache = agents
+
+        # If a prefetch is available and already done, wrap it in a resolved Future
+        if self._prefetch_future is not None and self._prefetch_future.done():
+            prefetch = self._prefetch_future
+            self._prefetch_future = None
+            try:
+                result = prefetch.result()
+                if result and 'rescuebot_task' in result:
+                    self.logger.info(
+                        f"[Planner] Used prefetched tasks: {result.get('reasoning', '')}"
+                    )
+                    f = concurrent.futures.Future()
+                    f.set_result(result)
+                    return f
+            except Exception as e:
+                self.logger.error(f"[Planner] Prefetch future raised: {e}")
+
+        # If prefetch exists but not done yet, return it (caller will poll)
+        if self._prefetch_future is not None:
+            future = self._prefetch_future
+            self._prefetch_future = None
+            return future
+
+        # No prefetch available: submit fresh task generation
+        return self._executor.submit(
+            self._generate_tasks_sync, world_state_summary, agents
+        )
+
+    def submit_summarize(self, iteration_data: IterationData,
+                         world_state_summary: str) -> concurrent.futures.Future:
+        """
+        Submit summarization to a background thread. Returns a Future immediately.
+
+        Also pre-fetches the next iteration's task assignments.
+        Never blocks the caller.
+        """
+        # Submit summarization
+        summary_future = self._executor.submit(
+            self._summarize_sync, iteration_data, world_state_summary
+        )
+
+        # Pre-fetch NEXT iteration's tasks in background
+        agents_for_prefetch = self._agents_cache if self._agents_cache else []
+        self._prefetch_future = self._executor.submit(
+            self._generate_tasks_sync, world_state_summary, agents_for_prefetch
+        )
+
+        # Update _last_summary when the summary completes (callback runs on pool thread)
+        def _on_summary_done(fut):
+            try:
+                self._last_summary = fut.result()
+            except Exception:
+                pass
+
+        summary_future.add_done_callback(_on_summary_done)
+        return summary_future
 
     def decide_next_step(self, iteration_data: IterationData) -> bool:
         """
