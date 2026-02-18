@@ -115,6 +115,7 @@ def parse_json_response(text: str) -> Optional[dict]:
     if not text:
         return None
     try:
+        print("[JSON:] " + text)
         # Try to find JSON in ```json code block
         match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
         if match:

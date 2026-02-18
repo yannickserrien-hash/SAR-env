@@ -163,7 +163,7 @@ class EnginePlanner:
             model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=200,
+            max_tokens=1000,
             temperature=0.5
         )
 
