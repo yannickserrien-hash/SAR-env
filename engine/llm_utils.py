@@ -50,7 +50,8 @@ def query_llm(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 1000,
-    temperature: float = 0.1
+    temperature: float = 0.1,
+    api_url: str = None
 ) -> Optional[str]:
     """
     Query an LLM via Ollama's chat API.
@@ -61,13 +62,15 @@ def query_llm(
         user_prompt: User message
         max_tokens: Maximum tokens in response
         temperature: Sampling temperature
+        api_url: Ollama base URL (e.g. 'http://localhost:11435'). Defaults to OLLAMA_BASE_URL.
 
     Returns:
         Response text string, or None if the call fails
     """
+    base_url = api_url or OLLAMA_BASE_URL
     try:
         response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/chat",
+            f"{base_url}/api/chat",
             json={
                 "model": model,
                 "messages": [
@@ -85,7 +88,7 @@ def query_llm(
         response.raise_for_status()
         return response.json()["message"]["content"]
     except requests.exceptions.ConnectionError:
-        logger.error("Cannot connect to Ollama at %s. Is it running?", OLLAMA_BASE_URL)
+        logger.error("Cannot connect to Ollama at %s. Is it running?", base_url)
         return None
     except requests.exceptions.Timeout:
         logger.error("Ollama request timed out")
@@ -100,7 +103,8 @@ def query_llm_async(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 5000,
-    temperature: float = 0.1
+    temperature: float = 0.1,
+    api_url: str = None
 ) -> concurrent.futures.Future:
     """
     Submit an LLM query to the background thread pool and return immediately.
@@ -113,13 +117,15 @@ def query_llm_async(
     thread managed by _llm_executor.
     """
     print("LLM queried")
+    print(user_prompt)
     return _get_executor().submit(
         query_llm,
         model,
         system_prompt,
         user_prompt,
         max_tokens,
-        temperature
+        temperature,
+        api_url
     )
 
 

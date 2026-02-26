@@ -18,13 +18,15 @@ if __name__ == "__main__":
     ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
     num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
     include_human = False        # Whether to add a keyboard-controlled human agent
+    ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
 
     # Scale LLM thread pool for the number of agents
     init_llm_pool(num_rescue_agents)
 
     builder, agents = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,
-        num_rescue_agents=num_rescue_agents, include_human=include_human
+        num_rescue_agents=num_rescue_agents, include_human=include_human,
+        ollama_base_port=ollama_base_port
     )
 
     # Start overarching MATRX scripts and threads
@@ -53,7 +55,8 @@ if __name__ == "__main__":
         llm_model='llama3:8b',
         task_description='',  # Uses DEFAULT_TASK_DESCRIPTION from engine_planner.py
         ticks_per_iteration=ticks_per_iteration,
-        include_human=include_human
+        include_human=include_human,
+        api_url=f"http://localhost:{ollama_base_port}"
     )
 
     # Run with MARBLE-style planning loop

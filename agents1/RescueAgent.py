@@ -15,6 +15,7 @@ import logging
 import threading
 import concurrent.futures
 from typing import List, Optional, Tuple, Dict, Any
+from engine.toon_utils import to_toon
 from matrx.agents.agent_utils.state import State
 from matrx.agents.agent_utils.navigator import Navigator
 from matrx.agents.agent_utils.state_tracker import StateTracker
@@ -27,7 +28,7 @@ from memory.short_term_memory import ShortTermMemory
 from brains1.ArtificialBrain import ArtificialBrain
 from actions1.CustomActions import Idle, CarryObject, Drop, CarryObjectTogether, DropObjectTogether
 from matrx.actions.object_actions import RemoveObject
-from engine.llm_utils import query_llm_async, parse_json_response
+from engine.llm_utils import parse_json_response
 
 
 class RescueAgent(PerceptionModule, ArtificialBrain):
@@ -48,7 +49,8 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         name: str,
         folder: str,
         llm_model: str = 'llama3:8b',
-        include_human: bool = True
+        include_human: bool = True,
+        ollama_port: int = 11434
     ):
         super().__init__(slowdown, condition, name, folder)
 
@@ -59,6 +61,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self._folder = folder
         self._llm_model = llm_model
         self._include_human = include_human
+        self._api_url = f"http://localhost:{ollama_port}"
         self._intro_done = False
 
         self._human_start_location = None
@@ -117,7 +120,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self.system_message = None
 
         # Structured short-term memory (LLM-curated, persists across tasks)
-        self.memory = ShortTermMemory(memory_limit=20, llm_model=self._llm_model)
+        self.memory = ShortTermMemory(memory_limit=20, llm_model=self._llm_model, api_url=self._api_url)
         self.agent_graph = [self._human_name]
 
         # Persistent world-knowledge dict updated every tick via add_new_obs().
@@ -171,6 +174,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             memory=self.memory,
             llm_model=[self._llm_model],
             prompts=self._prompts,
+            api_url=self._api_url,
         )
 
         self.communication_module = CommunicationModule(
@@ -180,6 +184,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             send_message_fn=self._send_message,
             memory=self.memory,
             world_memory=self.MEMORY,
+            api_url=self._api_url,
         )
 
     def set_current_task(self, task: str):
@@ -301,7 +306,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             with self._llm_lock:
                 no_pending = self._pending_llm_future is None
             if no_pending:
-                future = self.reasoning_module(self._current_task, observation=self.state_to_json(state), previous_action=self.last_action, world_state=self.MEMORY)
+                future = self.reasoning_module(self._current_task, observation=self.state_to_json(state), previous_action=self.last_action, world_state=to_toon(self.MEMORY))
                 
                 with self._llm_lock:
                     self._pending_llm_future = future
@@ -345,7 +350,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self._record_action_in_memory(f"{action}({params}), {object_id}", reasoning)
         
         print(f"[{self.agent_id}] Executing LLM action -> {action} params={params}")
-        self._send_message(f"[{self.agent_id}] Executing: {action} {params}", self.agent_id)
 
         # --- MoveTo navigation ---
         if action == 'MoveTo':
@@ -398,7 +402,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 'remove_range': 1,
                 'human_name': self._human_name
             }
-
+            
         # --- Communication actions ---
         if action in ('BroadcastObservation', 'SendMessage', 'SendAcceptHelpMessage'):
             tick = 0
@@ -409,7 +413,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
             if action == 'BroadcastObservation':
                 obs_json = self.observation_to_json(self._last_filtered_state)
-                from engine.toon_utils import to_toon
                 self.communication_module.generate_message(
                     'broadcast', tick,
                     observation_json=to_toon(obs_json),

@@ -48,7 +48,8 @@ class EnginePlanner:
         llm_model: str = 'llama3:8b',
         task_description: str = '',
         ticks_per_iteration: int = 100,
-        include_human: bool = True
+        include_human: bool = True,
+        api_url: str = None
     ):
         """
         Initialize EnginePlanner.
@@ -60,10 +61,12 @@ class EnginePlanner:
             task_description: High-level mission description for LLM context
             ticks_per_iteration: Number of MATRX ticks per planning iteration
             include_human: Whether a human agent is present in the simulation
+            api_url: Ollama base URL (None = default)
         """
         self.max_iterations = max_iterations
         self.score_file = score_file
         self.llm_model = llm_model
+        self._api_url = api_url
         self.task_description = task_description or DEFAULT_TASK_DESCRIPTION
         self.ticks_per_iteration = ticks_per_iteration
         self.include_human = include_human
@@ -137,7 +140,8 @@ class EnginePlanner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=1000,
-            temperature=0.2
+            temperature=0.2,
+            api_url=self._api_url
         )
 
         result = parse_json_response(response)
@@ -204,7 +208,8 @@ class EnginePlanner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=1000,
-            temperature=0.1
+            temperature=0.1,
+            api_url=self._api_url
         )
 
         if response:

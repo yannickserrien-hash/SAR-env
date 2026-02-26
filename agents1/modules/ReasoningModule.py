@@ -4,12 +4,13 @@ from memory.short_term_memory import ShortTermMemory
 
 
 class ReasoningBase:
-    def __init__(self, profile_type_prompt, memory: ShortTermMemory, llm_model, prompts=None):
+    def __init__(self, profile_type_prompt, memory: ShortTermMemory, llm_model, prompts=None, api_url=None):
         self.profile_type_prompt = profile_type_prompt
         self.memory = memory
         self.llm_model = llm_model[0]
         self.task_name_cache = None
         self._prompts = prompts  # YAML prompt dict (may be None)
+        self._api_url = api_url  # Per-agent Ollama URL (None = default)
 
     def process_task_description(self, task_description):
         task_name = re.findall(r'Your task is to:\s*(.*?)\s*>', task_description)
@@ -42,7 +43,8 @@ class ReasoningIO(ReasoningBase):
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=200,
-            temperature=0.1
+            temperature=0.1,
+            api_url=self._api_url
         )
         
     def _compact_memory(self, world_state: dict) -> str:
@@ -113,8 +115,6 @@ class ReasoningIO(ReasoningBase):
         carrying_str = ', '.join(carrying) if carrying else 'nothing'
 
         # --- Nearby objects: everything except the 'agent' key ---
-        # Compact JSON kept here: location strings like "(5,6)" contain commas, which TOON
-        # must quote, yielding no savings over already-compact JSON separators.
         nearby = {k: v for k, v in observation.items() if k != 'agent'} if isinstance(observation, dict) else {}
         nearby_json = _json.dumps(nearby, separators=(',', ':')) if nearby else '{}'
 
@@ -134,9 +134,8 @@ class ReasoningIO(ReasoningBase):
             agent_pos=agent_pos,
             carrying=carrying_str,
             nearby_json=nearby_json,
-            memory_compact=memory_compact,
+            memory_compact=world_state,
             prev_action=previous_action,
         )
-        print(user_prompt)
 
         return user_prompt

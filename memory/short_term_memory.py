@@ -27,14 +27,16 @@ class ShortTermMemory(BaseMemory):
     to merge old entries, keeping the storage within ``memory_limit``.
     """
 
-    def __init__(self, memory_limit: int = 20, llm_model: str = 'llama3:8b') -> None:
+    def __init__(self, memory_limit: int = 20, llm_model: str = 'llama3:8b', api_url: str = None) -> None:
         """
         Args:
             memory_limit: Maximum number of entries before compression kicks in.
+            api_url: Ollama base URL for this agent (None = default).
         """
         super().__init__()
         self.memory_limit: int = memory_limit
         self.llm_model: str = llm_model
+        self._api_url: str = api_url
         self.storage: List[Dict[str, Any]] = []
 
     def update(self, key: str, information: Dict[str, Any]) -> None:
@@ -94,6 +96,7 @@ class ShortTermMemory(BaseMemory):
                 user_prompt=user_prompt,
                 max_tokens=512,
                 temperature=0.0,
+                api_url=self._api_url,
             )
             parsed = parse_json_response(response)
             if parsed and 'entry' in parsed:

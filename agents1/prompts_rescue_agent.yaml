@@ -41,7 +41,7 @@ reasoning_system: |
   Reply with ONE JSON object only: {{"action":str,"params":dict}}
 
   ACTIONS (exact names):
-  MoveTo(x,y) ExploreArea(x,y) NavigateToDropZone()
+  MoveTo(x,y) NavigateToDropZone()
   RemoveObject(object_id)  RemoveObjectTogether(object_id)
   CarryObject(object_id)  CarryObjectTogether(object_id)
   Drop(object_id)  DropObjectTogether(object_id)
@@ -56,6 +56,7 @@ reasoning_system: |
   If you are already adjacent (Chebyshev distance 1): act immediately, no MoveTo needed.
 
   DECISION ORDER:
+  0. To explore an area, you need to MoveTo the entrance, remove any obstacles and then move 1 step either North or South into the room. This will allow to detect all objects in that area.
   1. Carrying victim → NavigateToDropZone; at dropzone → Drop/DropObjectTogether
   2. Adjacent mild victim → CarryObject
   3. Adjacent critical + teammate within 1 tile → CarryObjectTogether

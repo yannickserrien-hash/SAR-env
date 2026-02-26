@@ -74,7 +74,8 @@ class PerceptionModule:
             # --- Doors ---
             elif 'Door' in class_inh:
                 door_open = obj_data.get('is_open', True)
-                nearby.append(f"  Door '{obj_id}' at {loc} ({'open' if door_open else 'closed, non-traversable'})")
+                door_name = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else obj_id
+                nearby.append(f"  Door '{door_name}' at {loc} ({'open' if door_open else 'closed, non-traversable'})")
             # --- Obstacles: type-specific info ---
             elif 'ObstacleObject' in class_inh:
                 oid_lower = str(obj_id).lower()
@@ -513,12 +514,13 @@ class PerceptionModule:
 
             # --- Doors (area entrances) ---
             elif typ in ('door_open', 'door_closed'):
+                area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
                 existing = next(
-                    (d for d in self.MEMORY['door_houses'] if d['id'] == obj_id), None
+                    (d for d in self.MEMORY['door_houses'] if d['id'] == area_id), None
                 )
                 if existing is None:
                     self.MEMORY['door_houses'].append({
-                        'id': obj_id,
+                        'id': area_id,
                         'door': pos,
                     })
                 else:
@@ -604,9 +606,11 @@ class PerceptionModule:
                 elif typ == 'tree':
                     label = f"tree:{obj_id}"
                 elif typ == 'door_open':
-                    label = f"door_open:{obj_id}"
+                    area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
+                    label = f"{area_id}"
                 elif typ == 'door_closed':
-                    label = f"door_closed:{obj_id}"
+                    area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
+                    label = f"door_closed:{area_id}"
                 elif typ == 'wall':
                     label = f"wall"
                 elif typ == 'blocked':

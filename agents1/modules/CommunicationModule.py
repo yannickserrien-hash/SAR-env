@@ -39,6 +39,7 @@ class CommunicationModule:
         send_message_fn,
         memory,
         world_memory: Optional[Dict[str, Any]] = None,
+        api_url: str = None,
     ):
         """
         Args:
@@ -48,6 +49,7 @@ class CommunicationModule:
             send_message_fn: Reference to RescueAgent._send_message(content, sender).
             memory: Reference to RescueAgent.memory (ShortTermMemory).
             world_memory: Reference to RescueAgent.MEMORY (structured world-knowledge dict).
+            api_url: Ollama base URL for this agent (None = default).
         """
         self._llm_model = llm_model
         self._prompts = prompts
@@ -55,6 +57,7 @@ class CommunicationModule:
         self._send_message = send_message_fn
         self._memory = memory
         self._world_memory = world_memory
+        self._api_url = api_url
 
         # Outbound: list of pending futures (supports concurrent messages)
         self._outbound_futures: List[concurrent.futures.Future] = []
@@ -87,6 +90,7 @@ class CommunicationModule:
             user_prompt=user_prompt,
             max_tokens=120,
             temperature=0.2,
+            api_url=self._api_url,
         )
         self._outbound_futures.append(future)
 
@@ -170,6 +174,7 @@ class CommunicationModule:
             user_prompt=user_prompt,
             max_tokens=300,
             temperature=0.1,
+            api_url=self._api_url,
         )
 
     def _process_parsed_inbound(self, parsed: dict) -> None:

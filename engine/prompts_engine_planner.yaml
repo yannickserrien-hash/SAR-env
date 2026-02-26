@@ -25,6 +25,7 @@ generate_tasks_system: |
   - Prefer nearest suitable agent (Manhattan distance).
   - Do not assign completed objectives.
   - The tasks should include clear victim or obstacle ids, coordinates for locations in the description.
+  - The target_id and the location should be exactly the one from the WORLD_STATE, otherwise the action will not work.
 
   Output JSON only.
   No explanations.
@@ -43,7 +44,8 @@ generate_tasks_user: |
   Assign one task per agent.
   Task must include:
   - task_type
-  - target_id or location
+  - target_id
+  - location
   - notes (if coordination needed)
 
   Respond using this JSON schema:
