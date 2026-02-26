@@ -3,57 +3,61 @@
 # Literal JSON braces are escaped as {{ and }}.
 
 default_task_description: |
-  You are coordinating a search and rescue mission in a 25x24 grid world. There are 14 areas (rooms) that may contain victims. Victims must be found and carried to the drop-off zone at x=23, y=8. There are 8 target victims: 4 critically injured (+6 pts each) and 4 mildly injured (+3 pts each). Critically injured victims require BOTH agents to carry together. Mildly injured victims can be carried by one agent alone. Obstacles include: trees (RescueBot removes alone), small stones (either agent removes alone), and big rocks (require both agents). The human agent is controlled via keyboard and acts independently.
+  25x24 grid. 14 rooms. Drop zone: (23,8).
+  8 victims: 4 critical (+6, require 2 agents), 4 mild (+3, solo).
+  Obstacles: tree (solo), small_stone (solo), big_rock (2 agents).
+  Goal: maximize score, minimize time.
 
 generate_tasks_system: |
   You are the planning coordinator for a search and rescue mission.
   Your objective is to minimize mission time.
-  Your task is to first create {num_agents} high-level sub-tasks equal to the number of agents, based on:
+  You have {num_agents} AI agents available. Create one specific sub-task for each agent based on:
   The current state of the world and the agent capabilities.
-  After you generated the subtasks, you have to assign each one of them to a agent.
+  Assign different areas or objectives to different agents to maximize coverage.
   Always respond with valid JSON only.
 
+  You are the central planner for a search & rescue mission.
+  Goal: maximize score and minimize total time.
+  Assign EXACTLY one clear sub-task per agent. If multiple optimal assignments exist, minimize total travel distance.
+  Rules:
+  - Use full world knowledge.
+  - Avoid duplicate assignments unless collaboration required.
+  - Prefer nearest suitable agent (Manhattan distance).
+  - Do not assign completed objectives.
+  - The tasks should include clear victim or obstacle ids, coordinates for locations in the description.
+
+  Output JSON only.
+  No explanations.
+
 generate_tasks_user: |
-  ## Mission Description
+  MISSION:
   {task_description}
-
-  ## Current World State
+  WORLD_STATE:
   {world_state_summary}
-
-  ## Available Agents
-  - RescueBot (LLM-based agent, count: {num_agents}): Can explore areas, carry mildly injured victims alone, remove trees and small stones alone, cooperate with human for critical victims and big rocks.
-  - Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them.
-
-  ## Previous Iteration Summary
+  AGENTS:
+  {agent_ids_formatted}
+  {human_line}
+  PREVIOUS_PLAN:
   {previous_summary}
 
-  ## Planning Instructions
-  1. Calculate the distance between agents and objectives.
-  2. Review agent profiles to ensure the assigned agent can perform the required action (e.g., solo vs. joint tasks).
-  3. If an agent is idle or lacks skills for a nearby target, suggest coordination.
-  4. The sub-tasks should be specific and should contain clear instructions such as room numbers, locations, victim type and obstacle types in the way
+  Assign one task per agent.
+  Task must include:
+  - task_type
+  - target_id or location
+  - notes (if coordination needed)
 
-  Respond in JSON format:
-  {{
-  "rescuebot_task": "description of RescueBot's next subtask",
-  "human_task": "suggested task for human (sent as chat message)",
-  "reasoning": "brief explanation of your plan"
-  }}
+  Respond using this JSON schema:
+  {json_schema}
 
 summarize_system: |
-  You are summarizing the results of one planning iteration in a search and rescue simulation. Be concise (under 100 words).
-
+  Summarize this planning iteration in under 80 words. Focus on progress, remaining victims, and next priorities.
+  ASSIGNMENTS data uses TOON notation (indented key: value pairs instead of JSON).
 summarize_user: |
-  ## Task Assignments This Iteration
+  ASSIGNMENTS:
   {task_assignments_json}
-
-  ## Task Results
+  RESULTS:
   {task_results_text}
-
-  ## Current World State
+  WORLD_STATE:
   {world_state_summary}
-
-  ## Score
+  SCORE:
   {score_info}
-
-  Provide a concise summary of what happened and what remains to be done.

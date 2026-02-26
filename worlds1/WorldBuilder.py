@@ -60,8 +60,12 @@ def add_drop_off_zones(builder):
     for nr_zone in range(nr_drop_zones):
         builder.add_area((23,8), width=1, height=8, name=f"Drop off {nr_zone}", visualize_opacity=0.5, visualize_colour=drop_off_color, drop_zone_nr=nr_zone, is_drop_zone=True, is_goal_block=False, is_collectable=False) 
 
+# Candidate starting positions for AI agents (traversable street tiles near drop-off)
+_AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
+
 # Add the agents to the world
-def add_agents(builder, condition, name, folder, agent_type='baseline'):
+def add_agents(builder, condition, name, folder, agent_type='baseline',
+               num_rescue_agents=1, include_human=True):
     """
     Add agents to the world.
 
@@ -71,6 +75,8 @@ def add_agents(builder, condition, name, folder, agent_type='baseline'):
         name: Human agent name
         folder: Working folder path
         agent_type: Type of AI agent to use ('baseline' or 'llm')
+        num_rescue_agents: Number of LLM-based RescueAgents (1-5)
+        include_human: Whether to add a keyboard-controlled human agent
     """
     # Define the agent's sense capabilities
     sense_capability_agent = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
@@ -81,26 +87,28 @@ def add_agents(builder, condition, name, folder, agent_type='baseline'):
     for team in range(nr_teams):
         team_name = f"Team {team}"
         # Add the artificial agents based on condition and agent_type
-        nr_agents = agents_per_team - human_agents_per_team
-        for agent_nr in range(nr_agents):
+        for agent_nr in range(num_rescue_agents):
+            agent_name = f"RescueBot{agent_nr}"
             if agent_type == 'llm':
-                # Use RescueAgent-powered agent with modular LLM architecture
-                brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder, llm_model='llama3:8b')
+                brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
+                                    llm_model='llama3:8b', include_human=include_human)
                 agents.append(brain)
-                print("[WorldBuilder] Using LLM Agent (RescueAgent with modular architecture)")
+                print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
             else:
-                # Use baseline rule-based agent
                 brain = BaselineAgent(slowdown=8, condition=condition, name=name, folder=folder)
-                print("[WorldBuilder] Using Baseline Agent (rule-based)")
+                print(f"[WorldBuilder] Using Baseline Agent '{agent_name}' (rule-based)")
 
-            loc = (22,11)
-            builder.add_agent(loc, brain, team=team_name, name="RescueBot",customizable_properties=['score', 'thinking_state'], score=0, thinking_state='idle', sense_capability=sense_capability_agent, is_traversable=True, img_name="/images/robot-final4.svg")
+            loc = _AGENT_START_POSITIONS[agent_nr % len(_AGENT_START_POSITIONS)]
+            builder.add_agent(loc, brain, team=team_name, name=agent_name,
+                              customizable_properties=['score', 'thinking_state'],
+                              score=0, thinking_state='idle',
+                              sense_capability=sense_capability_agent,
+                              is_traversable=True, img_name="/images/robot-final4.svg")
 
-        # Add human agents based on condition, do not change human brain values
-        for human_agent_nr in range(human_agents_per_team):
+        # Add human agent (optional)
+        if include_human:
             brain = HumanBrain(max_carry_objects=1, grab_range=1, drop_range=0, remove_range=1, fov_occlusion=fov_occlusion, strength=condition, name=name)
-            loc = (22,12)
-            # agents.append(brain)
+            loc = (22, 12)
             builder.add_human_agent(loc, brain, team=team_name, name=name, key_action_map=key_action_map, sense_capability=sense_capability_human, is_traversable=True, img_name="/images/rescue-man-final3.svg", visualize_when_busy=True)
     return agents
 
@@ -193,7 +201,8 @@ def add_water(builder):
 
 
 # Create the world
-def create_builder(condition, name, folder, agent_type='baseline'):
+def create_builder(condition, name, folder, agent_type='baseline',
+                   num_rescue_agents=1, include_human=True):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -255,7 +264,8 @@ def create_builder(condition, name, folder, agent_type='baseline'):
         builder.add_object(loc,'roof', EnvObject,is_traversable=True, is_movable=False, visualize_shape='img',img_name="/images/roof-final5.svg")
 
     add_drop_off_zones(builder)
-    agents = add_agents(builder, condition, name, folder, agent_type)
+    agents = add_agents(builder, condition, name, folder, agent_type,
+                        num_rescue_agents=num_rescue_agents, include_human=include_human)
     add_victims(builder)
     add_obstacles(builder)
     add_decorative_objects(builder)
@@ -468,7 +478,8 @@ class CollectionGoal(WorldGoal):
             # update our satisfied boolean
             is_satisfied = is_satisfied and zone_satisfied
 
-        agent = grid_world.registered_agents['rescuebot']
-        agent.change_property('score', self.__score)
+        for agent_id, agent_body in grid_world.registered_agents.items():
+            if agent_id.startswith('rescuebot'):
+                agent_body.change_property('score', self.__score)
 
         return is_satisfied, progress

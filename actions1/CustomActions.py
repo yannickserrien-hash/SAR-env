@@ -6,6 +6,48 @@ from matrx.actions.object_actions import _is_drop_poss, _act_drop, _possible_dro
 from matrx.utils import get_distance
 import random
 
+
+def _find_partner_agent(world_state, agent_id):
+    """Find the nearest other agent (AI or human) for cooperative actions.
+
+    Searches all registered agents in the world state (except the acting agent)
+    and returns the dict of the nearest one, or None if no partner is found.
+    """
+    agent_data = world_state.get(agent_id)
+    if agent_data is None or not isinstance(agent_data, dict):
+        return None
+    agent_loc = agent_data.get('location')
+    if agent_loc is None:
+        return None
+    best, best_dist = None, float('inf')
+    for key, val in world_state.items():
+        if not isinstance(val, dict) or key == agent_id or key == 'World':
+            continue
+        inheritance = val.get('class_inheritance', [])
+        if not isinstance(inheritance, list):
+            continue
+        if 'AgentBody' in inheritance:
+            loc = val.get('location')
+            if loc is not None:
+                d = get_distance(agent_loc, loc)
+                if d < best_dist:
+                    best, best_dist = val, d
+    return best
+
+
+def _find_invisible_partner(grid_world, agent_id):
+    """Find the partner agent that was made invisible during a cooperative carry.
+
+    During CarryObjectTogether, the partner agent is set to opacity=0.
+    This helper finds that agent so it can be restored during drop.
+    """
+    for aid, agent_body in grid_world.registered_agents.items():
+        if aid == agent_id:
+            continue
+        if agent_body.properties.get('visualization', {}).get('opacity', 1) == 0:
+            return aid, agent_body
+    return None, None
+
 class Idle(Action):
     """ Let's an agent be idle for a specified number of ticks.
     Parameters
@@ -101,13 +143,9 @@ class RemoveObjectTogether(Action):
         assert 'object_id' in kwargs.keys()  # assert if object_id is given.
         object_id = kwargs['object_id']  # assign
         remove_range = 1  # default remove range
-        other_agent = world_state[{"name": "RescueBot"}]
-        other_human = world_state[{"name": kwargs['human_name']}]
-        output = ''
-        for xx in world_state.values():
-            output += str(xx) + '\n'
-        with open("output.txt", "w") as f:
-            f.write(str(output))
+
+        # Find the nearest partner agent (AI or human) for cooperative removal
+        partner = _find_partner_agent(world_state, agent_id)
 
         if 'remove_range' in kwargs.keys():  # if remove range is present
             assert isinstance(kwargs['remove_range'], int)  # should be of integer
@@ -125,15 +163,20 @@ class RemoveObjectTogether(Action):
         objects_in_range.pop(agent_id)
 
         for obj in objects_in_range:  # loop through all objects in range
-            if obj == object_id and get_distance(other_agent['location'], world_state[obj]['location'])<=remove_range and get_distance(other_human['location'], world_state[obj]['location'])<=remove_range and 'rock' in obj or \
-            obj == object_id and get_distance(other_agent['location'], world_state[obj]['location'])<=remove_range and get_distance(other_human['location'], world_state[obj]['location'])<=remove_range and 'stone' in obj:  # if object is in that list
-                success = grid_world.remove_from_grid(object_id)  # remove it, success is whether GridWorld succeeded
-                if success:  # if we succeeded in removal return the appropriate ActionResult
-                    return RemoveObjectResult(RemoveObjectResult.OBJECT_REMOVED.replace('object_id'.upper(),
-                                                                                        str(object_id)), True)
-                else:  # else we return a failure due to the GridWorld removal failed
-                    return RemoveObjectResult(RemoveObjectResult.REMOVAL_FAILED.replace('object_id'.upper(),
-                                                                                        str(object_id)), False)
+            if obj == object_id and ('rock' in obj or 'stone' in obj):
+                # Cooperative removal requires both agents within range
+                obj_loc = world_state[obj]['location']
+                agent_in_range = get_distance(agent_loc, obj_loc) <= remove_range
+                partner_in_range = (partner is not None and
+                                    get_distance(partner['location'], obj_loc) <= remove_range)
+                if agent_in_range and partner_in_range:
+                    success = grid_world.remove_from_grid(object_id)
+                    if success:
+                        return RemoveObjectResult(RemoveObjectResult.OBJECT_REMOVED.replace('object_id'.upper(),
+                                                                                            str(object_id)), True)
+                    else:
+                        return RemoveObjectResult(RemoveObjectResult.REMOVAL_FAILED.replace('object_id'.upper(),
+                                                                                            str(object_id)), False)
 
         # If the object was not in range, or no objects were in range we return that the object id was not in range
         return RemoveObjectResult(RemoveObjectResult.OBJECT_ID_NOT_WITHIN_RANGE
@@ -523,9 +566,10 @@ class Drop(Action):
         """
         reg_ag = grid_world.registered_agents[agent_id]
         drop_range = 1 if 'drop_range' not in kwargs else kwargs['drop_range']
-        other_human = world_state[{"name": kwargs['human_name']}]
-        other_agent_id = world_state[{"name": "RescueBot"}]['obj_id']
-        other_agent = grid_world.registered_agents[other_agent_id]
+
+        # Check if any partner agent is invisible (cooperative carry in progress)
+        _, invisible_partner = _find_invisible_partner(grid_world, agent_id)
+        coop_carry_active = invisible_partner is not None
 
         # If no object id is given, the last item is dropped
         if 'object_id' in kwargs:
@@ -535,9 +579,9 @@ class Drop(Action):
         else:
             return DropObjectResult(DropObjectResult.RESULT_NO_OBJECT, False)
 
-        #if 'critical' in obj_id or 'strength' in kwargs and 'mild' in obj_id and 'weak' in kwargs['strength']:
-        if 'critical' in obj_id or 'mild' in obj_id and other_agent.properties['visualization']['opacity']==0:
-            return DropObjectResult(DropObjectResult.RESULT_UNKNOWN_OBJECT_TYPE, False)            
+        # Block solo drop if this is a cooperative carry (use DropObjectTogether instead)
+        if 'critical' in obj_id or ('mild' in obj_id and coop_carry_active):
+            return DropObjectResult(DropObjectResult.RESULT_UNKNOWN_OBJECT_TYPE, False)
         else:
             return _possible_drop(grid_world, agent_id=agent_id, obj_id=obj_id, drop_range=drop_range)
 
@@ -746,9 +790,13 @@ class CarryObjectTogether(Action):
         object_id = None if 'object_id' not in kwargs else kwargs['object_id']
         grab_range = np.inf if 'grab_range' not in kwargs else kwargs['grab_range']
         max_objects = np.inf if 'max_objects' not in kwargs else kwargs['max_objects']
-        other_agent = world_state[{"name": "RescueBot"}]
-        
-        if object_id and get_distance(other_agent['location'], world_state[object_id]['location']) > grab_range:
+
+        # Find nearest partner agent (AI or human) for cooperative carry
+        partner = _find_partner_agent(world_state, agent_id)
+
+        if partner is None:
+            return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
+        if object_id and get_distance(partner['location'], world_state[object_id]['location']) > grab_range:
             return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
         else:
             return _is_possible_grab(grid_world, agent_id=agent_id, object_id=object_id, grab_range=grab_range,
@@ -814,22 +862,22 @@ class CarryObjectTogether(Action):
         env_obj.carried_by.append(agent_id)
         reg_ag.is_carrying.append(env_obj)  # we add the entire object!
 
-        other_agent_id = world_state[{"name": "RescueBot"}]['obj_id']
+        # Find the nearest partner agent to make invisible during cooperative carry
+        partner = _find_partner_agent(world_state, agent_id)
+        if partner is not None:
+            partner_id = partner['obj_id']
+            partner_body = grid_world.registered_agents[partner_id]
+            # make the partner agent invisible
+            partner_body.change_property("visualize_opacity", 0)
 
-        # if we want to change objects, we need to change the grid_world object 
-        other_agent = grid_world.registered_agents[other_agent_id]
         agent = grid_world.registered_agents[agent_id]
 
-        # make the other agent invisible 
-        other_agent.change_property("visualize_opacity", 0)
-
-        # change our image 
-        
+        # change carry image based on who is carrying
         object_id = None if 'object_id' not in kwargs else kwargs['object_id']
-        if 'critical' in object_id and kwargs['human_name'] in agent_id:
-            # change our image 
+        human_name = kwargs.get('human_name', '')
+        if 'critical' in object_id and human_name in agent_id:
             agent.change_property("img_name", "/images/carry-critical-final.svg")
-        if 'mild' in object_id and kwargs['human_name'] in agent_id:
+        if 'mild' in object_id and human_name in agent_id:
             agent.change_property("img_name", "/images/carry-mild-final.svg")
 
         # Remove it from the grid world (it is now stored in the is_carrying list of the AgentAvatar
@@ -971,8 +1019,11 @@ class DropObjectTogether(Action):
         """
         reg_ag = grid_world.registered_agents[agent_id]
         drop_range = 1 if 'drop_range' not in kwargs else kwargs['drop_range']
-        other_agent_id = world_state[{"name": "RescueBot"}]['obj_id']
-        other_agent = grid_world.registered_agents[other_agent_id]
+
+        # Check if any partner is invisible (cooperative carry in progress)
+        _, invisible_partner = _find_invisible_partner(grid_world, agent_id)
+        coop_carry_active = invisible_partner is not None
+
         # If no object id is given, the last item is dropped
         if 'object_id' in kwargs:
             obj_id = kwargs['object_id']
@@ -980,8 +1031,9 @@ class DropObjectTogether(Action):
             obj_id = reg_ag.is_carrying[-1].obj_id
         else:
             return DropObjectResult(DropObjectResult.RESULT_NO_OBJECT, False)
-        if 'healthy' in obj_id and other_agent.properties['visualization']['opacity']!=0 or 'mild' in obj_id and other_agent.properties['visualization']['opacity']!=0:
-            return DropObjectResult(DropObjectResult.RESULT_UNKNOWN_OBJECT_TYPE, False)            
+        # Block if not actually in a cooperative carry (healthy/mild without invisible partner)
+        if ('healthy' in obj_id and not coop_carry_active) or ('mild' in obj_id and not coop_carry_active):
+            return DropObjectResult(DropObjectResult.RESULT_UNKNOWN_OBJECT_TYPE, False)
         else:
             return _possible_drop(grid_world, agent_id=agent_id, obj_id=obj_id, drop_range=drop_range)
 
@@ -1023,9 +1075,11 @@ class DropObjectTogether(Action):
             objects can be on the same location.
         """
         reg_ag = grid_world.registered_agents[agent_id]
-        other_agent_id = world_state[{"name": "RescueBot"}]['obj_id']
-        other_agent = grid_world.registered_agents[other_agent_id]
         agent = grid_world.registered_agents[agent_id]
+
+        # Find the partner that was made invisible during cooperative carry
+        partner_id, partner_body = _find_invisible_partner(grid_world, agent_id)
+
         # fetch range from kwargs
         drop_range = 1 if 'drop_range' not in kwargs else kwargs['drop_range']
 
@@ -1037,14 +1091,18 @@ class DropObjectTogether(Action):
             env_obj = reg_ag.is_carrying[-1]
         else:
             return DropObjectResult(DropObjectResult.RESULT_NO_OBJECT_CARRIED, False)
-        
-        other_agent.change_property("location", agent.properties['location'])
 
-        # make the other agent visible again 
-        other_agent.change_property("visualize_opacity", 1)
+        # Restore the invisible partner agent
+        if partner_body is not None:
+            partner_body.change_property("location", agent.properties['location'])
+            partner_body.change_property("visualize_opacity", 1)
 
-        # change the agent image back to default 
-        agent.change_property("img_name", "/images/rescue-man-final3.svg")
+        # Reset the carrying agent's image to default
+        human_name = kwargs.get('human_name', '')
+        if human_name and human_name in agent_id:
+            agent.change_property("img_name", "/images/rescue-man-final3.svg")
+        else:
+            agent.change_property("img_name", "/images/robot-final4.svg")
 
         # check that it is even possible to drop this object somewhere
         if not env_obj.is_traversable and not reg_ag.is_traversable and drop_range == 0:

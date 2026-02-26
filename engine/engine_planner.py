@@ -47,7 +47,8 @@ class EnginePlanner:
         score_file: str = "logs/score.json",
         llm_model: str = 'llama3:8b',
         task_description: str = '',
-        ticks_per_iteration: int = 100
+        ticks_per_iteration: int = 100,
+        include_human: bool = True
     ):
         """
         Initialize EnginePlanner.
@@ -58,12 +59,14 @@ class EnginePlanner:
             llm_model: Ollama model name for LLM calls
             task_description: High-level mission description for LLM context
             ticks_per_iteration: Number of MATRX ticks per planning iteration
+            include_human: Whether a human agent is present in the simulation
         """
         self.max_iterations = max_iterations
         self.score_file = score_file
         self.llm_model = llm_model
         self.task_description = task_description or DEFAULT_TASK_DESCRIPTION
         self.ticks_per_iteration = ticks_per_iteration
+        self.include_human = include_human
         self.iteration_history: List[IterationData] = []
         self.logger = logging.getLogger('EnginePlanner')
         self._last_summary = ""
@@ -78,23 +81,51 @@ class EnginePlanner:
         # Cached agent list so prefetch submissions don't need a caller-supplied list.
         self._agents_cache: list = []
 
-    # ------------------------------------------------------------------
-    # Private synchronous cores (run inside background threads)
-    # ------------------------------------------------------------------
-
     def _generate_tasks_sync(self, world_state_summary: str, agents: list) -> Dict[str, str]:
         """
         Synchronous core of task generation — called inside a background thread.
+
+        Returns a dict with:
+        - 'agent_tasks': {agent_id: task_string} for each AI agent
+        - 'human_task': suggested task for human (if include_human)
+        - 'reasoning': explanation of plan
+        - 'rescuebot_task': (backward compat) shared fallback task
         """
         num_agents = len(agents)
+        # Build per-agent ID list for the prompt
+        agent_ids = [getattr(a, 'agent_id', f'rescuebot{i}') for i, a in enumerate(agents)]
+
+        # Build a formatted agent listing for the prompt
+        agent_lines = []
+        for aid in agent_ids:
+            agent_lines.append(
+                f"  - {aid} (LLM-based): Can explore areas, carry mildly injured victims alone, "
+                f"remove trees and small stones alone, cooperate with another agent for critical victims and big rocks."
+            )
+        agent_ids_formatted = '\n'.join(agent_lines)
+
+        # Build the JSON schema example for the prompt
+        agent_tasks_schema = ', '.join(f'"{aid}": "task for {aid}"' for aid in agent_ids)
+        json_schema = f'{{"agent_tasks": {{{agent_tasks_schema}}}'
+        if self.include_human:
+            json_schema += ', "human_task": "suggested task for human"'
+        json_schema += ', "reasoning": "brief explanation"}'
 
         system_prompt = PROMPTS['generate_tasks_system'].format(
             num_agents=num_agents
         )
+
+        human_line = ""
+        if self.include_human:
+            human_line = "- Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them."
+
         user_prompt = PROMPTS['generate_tasks_user'].format(
             task_description=self.task_description,
             world_state_summary=world_state_summary,
             num_agents=num_agents,
+            agent_ids_formatted=agent_ids_formatted,
+            human_line=human_line,
+            json_schema=json_schema,
             previous_summary=(
                 self._last_summary if self._last_summary
                 else "This is the first iteration."
@@ -110,17 +141,25 @@ class EnginePlanner:
         )
 
         result = parse_json_response(response)
-        if result and 'rescuebot_task' in result:
-            self.logger.info(f"  LLM task generation: {result.get('reasoning', '')}")
-            return result
+        if result:
+            # Accept new format (agent_tasks) or old format (rescuebot_task)
+            if 'agent_tasks' in result:
+                self.logger.info(f"  LLM task generation (per-agent): {result.get('reasoning', '')}")
+                return result
+            if 'rescuebot_task' in result:
+                self.logger.info(f"  LLM task generation (shared): {result.get('reasoning', '')}")
+                return result
 
         # Fallback if LLM fails
-        self.logger.warning("  LLM task generation failed, using fallback")
-        return {
+        self.logger.warning("LLM task generation failed, using fallback")
+        fallback = {
+            'agent_tasks': {aid: 'explore nearest unexplored area' for aid in agent_ids},
             'rescuebot_task': 'explore nearest unexplored area',
-            'human_task': 'Please explore areas and rescue victims',
             'reasoning': 'Fallback: LLM unavailable'
         }
+        if self.include_human:
+            fallback['human_task'] = 'Please explore areas and rescue victims'
+        return fallback
 
     def _summarize_sync(self, iteration_data: IterationData,
                         world_state_summary: str) -> str:
@@ -151,9 +190,10 @@ class EnginePlanner:
         if not task_results_text:
             task_results_text = "No task results recorded this iteration."
 
+        from engine.toon_utils import to_toon
         system_prompt = PROMPTS['summarize_system'].strip()
         user_prompt = PROMPTS['summarize_user'].format(
-            task_assignments_json=json.dumps(iteration_data.task_assignments, indent=2),
+            task_assignments_json=to_toon(iteration_data.task_assignments),
             task_results_text=task_results_text,
             world_state_summary=world_state_summary,
             score_info=score_info,
@@ -164,7 +204,7 @@ class EnginePlanner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             max_tokens=1000,
-            temperature=0.5
+            temperature=0.1
         )
 
         if response:
@@ -200,7 +240,7 @@ class EnginePlanner:
             self._prefetch_future = None
             try:
                 result = prefetch.result()
-                if result and 'rescuebot_task' in result:
+                if result and ('agent_tasks' in result or 'rescuebot_task' in result):
                     self.logger.info(
                         f"[Planner] Used prefetched tasks: {result.get('reasoning', '')}"
                     )
@@ -217,6 +257,25 @@ class EnginePlanner:
             return future
 
         # No prefetch available: submit fresh task generation
+        return self._executor.submit(
+            self._generate_tasks_sync, world_state_summary, agents
+        )
+
+    def request_new_task(self, world_state_summary: str,
+                         agents: list) -> concurrent.futures.Future:
+        """
+        Agent-triggered mid-iteration task re-allocation.
+
+        Submits a fresh LLM task generation call to the background executor and
+        returns a Future immediately — never blocks the MATRX tick loop.
+        The caller (RescueAgent) polls .done() each tick and calls
+        set_current_task() with the result when the Future resolves.
+
+        Bypasses the prefetch cache so the world state used is current.
+        """
+        if agents:
+            self._agents_cache = agents
+        self.logger.info("[Planner] Mid-iteration re-task requested by agent.")
         return self._executor.submit(
             self._generate_tasks_sync, world_state_summary, agents
         )

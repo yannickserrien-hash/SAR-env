@@ -250,7 +250,7 @@ class GridWorld:
                 break
 
 ###### PLANNER RUN
-    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=600):
+    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=600, include_human=True):
         """
         Run GridWorld with MARBLE-style planning loop.
 
@@ -274,6 +274,10 @@ class GridWorld:
 
         # Initialize the gridworld
         self.initialize(api_info)
+
+        # Auto-start if no human is present (no one to click Start in the browser)
+        if not include_human:
+            api.matrx_paused = False
 
         if self.__verbose:
             print(f"@{os.path.basename(__file__)}: Starting game loop with planner...")
@@ -331,25 +335,68 @@ class GridWorld:
                     planning_future = None
                     iteration_data.task_assignments = task_assignments
 
-                    print(f"[GridWorld] Tasks: rescuebot='{task_assignments.get('rescuebot_task', '?')}' "
-                          f"human='{task_assignments.get('human_task', '?')}'")
+                    print(f"[GridWorld] Tasks: {task_assignments}")
 
-                    # Distribute tasks to AI agents
-                    rescuebot_task = task_assignments.get('rescuebot_task', 'explore')
+                    # Distribute tasks to AI agents (per-agent if available, else shared)
+                    agent_tasks = task_assignments.get('agent_tasks', {})
+                    shared_task = task_assignments.get('rescuebot_task', 'explore')
                     for agent in agents:
                         if hasattr(agent, 'set_current_task'):
-                            agent.set_current_task(rescuebot_task)
+                            aid = getattr(agent, 'agent_id', None)
+                            task = agent_tasks.get(aid, shared_task)
+                            agent.set_current_task(task)
 
-                    # Send human's suggested task as a MATRX message
-                    human_task = task_assignments.get('human_task', '')
-                    if human_task:
-                        self._send_planner_message_to_human(human_task, agents)
+                    # Inject mid-iteration re-task callback so agents can request a new
+                    # task when they finish early, without waiting for the iteration to end.
+                    # The callback captures the current planner + agent list and serializes
+                    # the live world state at the moment the agent calls it.
+                    gw = self  # capture grid_world reference for state serialization
+                    for agent in agents:
+                        if hasattr(agent, '_request_task_callback'):
+                            def _make_callback(_agent=agent):
+                                def _callback():
+                                    _ws = gw._serialize_state_for_llm(
+                                        gw._GridWorld__get_complete_state()
+                                    )
+                                    return planner.request_new_task(_ws, agents)
+                                return _callback
+                            agent._request_task_callback = _make_callback()
+
+                    # Broadcast task assignments to in-game chat
+                    for agent in agents:
+                        if hasattr(agent, 'send_message'):
+                            aid = getattr(agent, 'agent_id', None)
+                            task_for_agent = agent_tasks.get(aid, shared_task)
+                            msg = Message(
+                                content=f"[Planner] Task for {aid}: {task_for_agent}",
+                                from_id='Planner'
+                            )
+                            agent.send_message(msg)
+
+                    # Broadcast planner reasoning to chat (once, via first agent)
+                    reasoning = task_assignments.get('reasoning', '')
+                    if reasoning:
+                        for agent in agents:
+                            if hasattr(agent, 'send_message'):
+                                msg = Message(
+                                    content=f"[Planner] Plan: {reasoning}",
+                                    from_id='Planner'
+                                )
+                                agent.send_message(msg)
+                                break  # Only need one agent to broadcast
+
+                    # Send human's suggested task as a MATRX message (only if human exists)
+                    if include_human:
+                        human_task = task_assignments.get('human_task', '')
+                        if human_task:
+                            self._send_planner_message_to_human(human_task, agents)
 
                     # Record initial task results
                     for agent in agents:
+                        aid = getattr(agent, 'agent_id', 'rescuebot')
                         iteration_data.task_results.append({
-                            'agent_id': getattr(agent, 'agent_id', 'rescuebot'),
-                            'task': rescuebot_task,
+                            'agent_id': aid,
+                            'task': agent_tasks.get(aid, shared_task),
                             'result': {'status': 'executing'}
                         })
 
@@ -423,11 +470,11 @@ class GridWorld:
                 summary_parts.append(f"Tick: {obj_data.get('nr_ticks', 0)}")
                 continue
 
-            if obj_id == 'rescuebot':
-                summary_parts.append(f"Agent rescuebot (LLM-based) at {world_state[obj_id]['location']}{world_state[obj_id].get('is_carrying', [])}")
-
-            if obj_id == 'ale': # TODO update agent summary
-                summary_parts.append(f"Agent ale (human controlled) at {world_state[obj_id]['location']}{world_state[obj_id].get('is_carrying', [])}")
+            if obj_id in self.registered_agents:
+                is_human = self.registered_agents[obj_id].is_human_agent
+                label = 'human-controlled' if is_human else 'LLM-based'
+                carrying = world_state[obj_id].get('is_carrying', [])
+                summary_parts.append(f"Agent {obj_id} ({label}) at {world_state[obj_id]['location']} carrying={carrying}")
 
             if not isinstance(obj_data, dict):
                 continue

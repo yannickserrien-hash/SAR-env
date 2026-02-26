@@ -31,36 +31,23 @@ class ShortTermMemory(BaseMemory):
         """
         Args:
             memory_limit: Maximum number of entries before compression kicks in.
-            llm_model: Ollama model name used for entry summarization.
         """
         super().__init__()
         self.memory_limit: int = memory_limit
         self.llm_model: str = llm_model
-        # Override parent's generic list with typed list
         self.storage: List[Dict[str, Any]] = []
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def update(self, key: str, information: Dict[str, Any]) -> None:
         """
-        Append a structured entry to memory.
-
-        If storage is at capacity, the two oldest entries are popped and
-        compressed into a single ``memory_summary`` entry first.
+        Update memory with new information.
 
         Args:
-            key: Ignored (kept for BaseMemory signature compatibility).
-            information: A dict with at least a ``type`` key.
+            key (str): Only here to keep the signature consistent with SharedMemory.
+            information (Dict[str, Union[str, Any]]): Information to store.
         """
         if len(self.storage) >= self.memory_limit:
             self._compress_oldest()
         self.storage.append(information)
-
-    def retrieve_by_type(self, entry_type: str) -> List[Dict[str, Any]]:
-        """Return all entries whose ``type`` matches *entry_type*."""
-        return [e for e in self.storage if e.get('type') == entry_type]
 
     def get_compact_str(self) -> str:
         """
@@ -79,10 +66,6 @@ class ShortTermMemory(BaseMemory):
         """Return a shallow copy of all entries."""
         return self.storage.copy()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
     def _compress_oldest(self) -> None:
         """Pop up to 2 oldest entries and replace with a compressed summary."""
         count = min(2, len(self.storage))
@@ -91,46 +74,35 @@ class ShortTermMemory(BaseMemory):
         oldest = [self.storage.pop(0) for _ in range(count)]
         compressed = self._summarize_entries(oldest)
         self.storage.insert(0, {
-            'type': 'memory_summary',
+            'type': 'old_memory_summary',
             'entries': compressed,
         })
 
-    def _summarize_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Use the Ollama LLM to merge *entries* into fewer structured dicts.
-
-        Falls back to returning the original entries unchanged if the LLM
-        call fails or returns unparseable output.
-        """
-        # Late import to avoid circular dependency at module load time
+    def _summarize_entries(self, memory: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         from engine.llm_utils import query_llm, parse_json_response
 
-        system_prompt = (
-            "You are compressing old memory entries for a search-and-rescue "
-            "robot. Merge the given entries into fewer structured entries, "
-            "preserving all critical facts (victim locations, explored rooms, "
-            "obstacles). Output ONLY valid JSON: {\"entries\": [...]}"
-        )
+        system_prompt = "You are a helpful assistant that can concisely summarize the following json format content which is listed in temporally sequential order.\n"
+
         user_prompt = (
-            "Compress these old memory entries:\n"
-            f"{json.dumps(entries, default=str)}\n\n"
-            "Return JSON: {\"entries\": [...]}"
-        )
+            "Summarize these entries into a single entry and return a valid JSON {\"entry\": [...]}. The entries are:\n"
+            f"{json.dumps(memory, default=str)}\n\n"        )
 
         try:
             response = query_llm(
                 model=self.llm_model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=1000,
-                temperature=0.1,
+                max_tokens=512,
+                temperature=0.0,
             )
             parsed = parse_json_response(response)
-            if parsed and 'entries' in parsed and isinstance(parsed['entries'], list):
-                logger.info(f"Compressed {len(entries)} entries -> {len(parsed['entries'])}")
-                return parsed['entries']
+            if parsed and 'entry' in parsed:
+                entry = parsed['entry']
+                if isinstance(entry, dict):
+                    entry = [entry]   # wrap single dict into a list
+                if isinstance(entry, list):
+                    return entry
         except Exception as exc:
             logger.warning(f"LLM summarization failed ({exc}), keeping originals")
 
-        # Fallback: return originals unchanged
-        return entries
+        return memory

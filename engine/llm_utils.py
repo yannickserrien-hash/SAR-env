@@ -17,11 +17,32 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 logger = logging.getLogger('llm_utils')
 
 # Module-level thread pool shared by all async LLM callers.
-# 4 workers is sufficient for 2–3 concurrent calls (RescueAgent + EnginePlanner).
-_llm_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix='llm_worker'
-)
+# Lazily initialised — call init_llm_pool(num_agents) at startup to size it.
+_llm_executor = None
+
+
+def init_llm_pool(num_agents: int = 1) -> None:
+    """Initialise the LLM thread pool based on the number of agents.
+
+    Call once at startup, before any LLM queries are submitted.
+    Workers = max(4, num_agents * 3) so each agent can have ~3 concurrent
+    LLM calls (reasoning + memory extraction + communication) in flight.
+    """
+    global _llm_executor
+    workers = max(4, num_agents * 3)
+    _llm_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix='llm_worker'
+    )
+    logger.info("LLM thread pool initialised with %d workers (num_agents=%d)", workers, num_agents)
+
+
+def _get_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the LLM executor, creating a default 4-worker pool if needed."""
+    global _llm_executor
+    if _llm_executor is None:
+        init_llm_pool(1)
+    return _llm_executor
 
 
 def query_llm(
@@ -78,7 +99,7 @@ def query_llm_async(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 1000,
+    max_tokens: int = 5000,
     temperature: float = 0.1
 ) -> concurrent.futures.Future:
     """
@@ -91,7 +112,8 @@ def query_llm_async(
     This function NEVER blocks — the requests.post call runs in a daemon
     thread managed by _llm_executor.
     """
-    return _llm_executor.submit(
+    print("LLM queried")
+    return _get_executor().submit(
         query_llm,
         model,
         system_prompt,
@@ -104,7 +126,11 @@ def query_llm_async(
 def parse_json_response(text: str) -> Optional[dict]:
     """
     Extract JSON from LLM response text.
-    Handles responses with ```json code blocks or raw JSON.
+
+    Tries in order:
+    1. ```json ... ``` fenced code block
+    2. Raw JSON object (strict json.loads)
+    3. Python dict literal via ast.literal_eval  ← handles single-quoted responses
 
     Args:
         text: Raw LLM response text
@@ -112,21 +138,42 @@ def parse_json_response(text: str) -> Optional[dict]:
     Returns:
         Parsed dict, or None if parsing fails
     """
+    import ast
+
     if not text:
         return None
-    try:
-        print("[JSON:] " + text)
-        # Try to find JSON in ```json code block
-        match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if match:
+
+    print("[JSON:] " + text)
+
+    # 1. Fenced ```json block
+    match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
             return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-        # Try to find raw JSON object
-        start = text.find('{')
-        end = text.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            return json.loads(text[start:end + 1])
-    except json.JSONDecodeError as e:
-        logger.warning("Failed to parse JSON from LLM response: %s", e)
+    # Isolate the outermost { ... } span for attempts 2 & 3
+    start = text.find('{')
+    end = text.rfind('}')
+    if start == -1 or end == -1 or end <= start:
+        return None
 
+    candidate = text[start:end + 1]
+
+    # 2. Strict JSON (double-quoted keys/values)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Python dict literal — handles single-quoted strings from the LLM
+    try:
+        result = ast.literal_eval(candidate)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    logger.warning("Failed to parse JSON/dict from LLM response: %s", text[:200])
     return None

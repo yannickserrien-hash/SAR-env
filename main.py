@@ -6,18 +6,25 @@ from SaR_gui import visualization_server
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from engine.engine_planner import EnginePlanner
+from engine.llm_utils import init_llm_pool
 
 if __name__ == "__main__":
     fld = os.getcwd()
 
     # Configuration
     condition = "normal"
-    name = "ale"
+    name = "humanagent"
     agent_type = 'llm'
     ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
+    num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
+    include_human = False        # Whether to add a keyboard-controlled human agent
+
+    # Scale LLM thread pool for the number of agents
+    init_llm_pool(num_rescue_agents)
 
     builder, agents = create_builder(
-        condition=condition, name=name, agent_type=agent_type, folder=fld
+        condition=condition, name=name, agent_type=agent_type, folder=fld,
+        num_rescue_agents=num_rescue_agents, include_human=include_human
     )
 
     # Start overarching MATRX scripts and threads
@@ -44,16 +51,17 @@ if __name__ == "__main__":
         max_iterations=50,
         score_file=score_file,
         llm_model='llama3:8b',
-        # TODO: Customize this task_description based on your project needs
         task_description='',  # Uses DEFAULT_TASK_DESCRIPTION from engine_planner.py
-        ticks_per_iteration=ticks_per_iteration
+        ticks_per_iteration=ticks_per_iteration,
+        include_human=include_human
     )
 
     # Run with MARBLE-style planning loop
     builder.api_info['matrx_paused'] = False
     iteration_history = world.run_with_planner(
         builder.api_info, planner, agents,
-        ticks_per_iteration=ticks_per_iteration
+        ticks_per_iteration=ticks_per_iteration,
+        include_human=include_human
     )
 
     print("DONE!")

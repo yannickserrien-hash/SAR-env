@@ -712,20 +712,12 @@ def get_move_actions(action_set):
     for action_name in action_set:
         if action_name == MoveNorth.__name__:
             move_actions[action_name] = (0, -1)
-        elif action_name == MoveNorthEast.__name__:
-            move_actions[action_name] = (1, -1)
         elif action_name == MoveEast.__name__:
             move_actions[action_name] = (1, 0)
-        elif action_name == MoveSouthEast.__name__:
-            move_actions[action_name] = (1, 1)
-        elif action_name == MoveSouthWest.__name__:
-            move_actions[action_name] = (-1, 1)
         elif action_name == MoveSouth.__name__:
             move_actions[action_name] = (0, 1)
         elif action_name == MoveWest.__name__:
             move_actions[action_name] = (-1, 0)
-        elif action_name == MoveNorthWest.__name__:
-            move_actions[action_name] = (-1, -1)
 
     # And moving nowhere is also possible
     move_actions[None] = (0, 0)
