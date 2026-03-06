@@ -94,8 +94,6 @@ class ShortTermMemory(BaseMemory):
                 model=self.llm_model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                max_tokens=512,
-                temperature=0.0,
                 api_url=self._api_url,
             )
             parsed = parse_json_response(response)

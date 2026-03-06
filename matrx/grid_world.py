@@ -1,5 +1,6 @@
 import datetime
 import os.path
+import random
 import warnings
 from collections import OrderedDict
 import time
@@ -16,6 +17,41 @@ from matrx.objects.standard_objects import AreaTile
 from matrx.messages.message_manager import MessageManager
 from matrx.objects.agent_body import _get_all_classes
 from matrx.api import api
+from engine.toon_utils import to_toon
+
+
+def _classify_object_type(obj_id: str, obj_data: dict):
+    """Classify a world object into a type string, or return None for uninteresting objects.
+
+    Mirrors PerceptionModule._classify_object but as a plain module-level function
+    so it can be used by GridWorld without importing from agents1/.
+    """
+    if not isinstance(obj_data, dict):
+        return None
+    img       = obj_data.get('img_name', '')
+    class_inh = obj_data.get('class_inheritance', [])
+    oid_lower = str(obj_id).lower()
+
+    if obj_data.get('is_collectable', False):
+        img_l = str(img).lower()
+        if 'critical' in img_l:
+            return 'crit'
+        elif 'mild' in img_l:
+            return 'mild'
+        else:
+            return 'healthy'
+    elif 'ObstacleObject' in class_inh:
+        if 'rock' in oid_lower:
+            return 'rock'
+        elif 'stone' in oid_lower:
+            return 'stone'
+        elif 'tree' in oid_lower:
+            return 'tree'
+        else:
+            return 'stone'
+    elif 'Door' in class_inh:
+        return 'door_open' if obj_data.get('is_open', True) else 'door_closed'
+    return None
 
 
 class GridWorld:
@@ -118,7 +154,7 @@ class GridWorld:
         self.__run_matrx_api = False  # Bool if API is running
         self.__loggers = []  # a list of GridWorldLogger use to log the data
         self.__is_done = False  # Whether the simulation is done (goal(s) reached)
-        self.__rnd_seed = rnd_seed  # The random seed of this GridWorld
+        self.__rnd_seed = random.randint(1, 1000000)  # The random seed of this GridWorld
         self.__rnd_gen = np.random.RandomState(seed=self.__rnd_seed)  # The random state of this GridWorld
         self.__curr_tick_duration = 0.  # Duration of the current tick
         self.__current_nr_ticks = 0  # The number of tick this GridWorld has ran already
@@ -271,9 +307,17 @@ class GridWorld:
         """
         from engine.iteration_data import IterationData
         from matrx.messages.message import Message
+        from engine.planner_channel import PlannerChannel
 
         # Initialize the gridworld
         self.initialize(api_info)
+
+        # Create and wire up bidirectional agent ↔ planner communication channel
+        channel = PlannerChannel()
+        planner.set_channel(channel)
+        for agent in agents:
+            if hasattr(agent, 'set_planner_channel'):
+                agent.set_planner_channel(channel)
 
         # Auto-start if no human is present (no one to click Start in the browser)
         if not include_human:
@@ -316,9 +360,9 @@ class GridWorld:
 
                 # Submit planning to background thread (returns Future immediately)
                 world_state = self.__get_complete_state()
-                ws_summary = self._serialize_state_for_llm(world_state)
+                map = self.process_map_to_dict(world_state)
                 
-                planning_future = planner.submit_generate_tasks(ws_summary, agents)
+                planning_future = planner.submit_generate_tasks(to_toon(map), agents)
                 phase = PLANNING_IN_PROGRESS
 
             if phase == PLANNING_IN_PROGRESS and planning_future is not None: # assign tasks
@@ -327,23 +371,16 @@ class GridWorld:
                         task_assignments = planning_future.result()
                     except Exception as e:
                         print(f"[GridWorld] Planning error: {e}")
-                        task_assignments = {
-                            'rescuebot_task': 'explore nearest unexplored area',
-                            'human_task': 'Please explore areas and rescue victims',
-                            'reasoning': 'Fallback: planning error'
-                        }
+
                     planning_future = None
                     iteration_data.task_assignments = task_assignments
 
-                    print(f"[GridWorld] Tasks: {task_assignments}")
-
-                    # Distribute tasks to AI agents (per-agent if available, else shared)
-                    agent_tasks = task_assignments.get('agent_tasks', {})
-                    shared_task = task_assignments.get('rescuebot_task', 'explore')
+                    # Distribute tasks to AI agents
+                    agent_tasks = task_assignments.get('tasks', {})
                     for agent in agents:
                         if hasattr(agent, 'set_current_task'):
                             aid = getattr(agent, 'agent_id', None)
-                            task = agent_tasks.get(aid, shared_task)
+                            task = agent_tasks.get(aid, "Explore Area 1")
                             agent.set_current_task(task)
 
                     # Inject mid-iteration re-task callback so agents can request a new
@@ -355,35 +392,12 @@ class GridWorld:
                         if hasattr(agent, '_request_task_callback'):
                             def _make_callback(_agent=agent):
                                 def _callback():
-                                    _ws = gw._serialize_state_for_llm(
+                                    _ws = gw.process_map_to_dict(
                                         gw._GridWorld__get_complete_state()
                                     )
                                     return planner.request_new_task(_ws, agents)
                                 return _callback
                             agent._request_task_callback = _make_callback()
-
-                    # Broadcast task assignments to in-game chat
-                    for agent in agents:
-                        if hasattr(agent, 'send_message'):
-                            aid = getattr(agent, 'agent_id', None)
-                            task_for_agent = agent_tasks.get(aid, shared_task)
-                            msg = Message(
-                                content=f"[Planner] Task for {aid}: {task_for_agent}",
-                                from_id='Planner'
-                            )
-                            agent.send_message(msg)
-
-                    # Broadcast planner reasoning to chat (once, via first agent)
-                    reasoning = task_assignments.get('reasoning', '')
-                    if reasoning:
-                        for agent in agents:
-                            if hasattr(agent, 'send_message'):
-                                msg = Message(
-                                    content=f"[Planner] Plan: {reasoning}",
-                                    from_id='Planner'
-                                )
-                                agent.send_message(msg)
-                                break  # Only need one agent to broadcast
 
                     # Send human's suggested task as a MATRX message (only if human exists)
                     if include_human:
@@ -396,7 +410,7 @@ class GridWorld:
                         aid = getattr(agent, 'agent_id', 'rescuebot')
                         iteration_data.task_results.append({
                             'agent_id': aid,
-                            'task': agent_tasks.get(aid, shared_task),
+                            'task': agent_tasks.get(aid, "Explore Area 1"),
                             'result': {'status': 'executing'}
                         })
 
@@ -412,8 +426,8 @@ class GridWorld:
 
                 # Submit summarization to background thread
                 world_state = self.__get_complete_state()
-                ws_summary = self._serialize_state_for_llm(world_state)
-                summary_future = planner.submit_summarize(iteration_data, ws_summary)
+                map = self.process_map_to_dict(world_state)
+                summary_future = planner.submit_summarize(iteration_data, map)
                 phase = SUMMARIZING
 
             if phase == SUMMARIZING and summary_future is not None:
@@ -445,6 +459,9 @@ class GridWorld:
             is_done, tick_duration = self.__step()
             ticks_in_iteration += 1
 
+            # Process agent ↔ planner communication (non-blocking, every tick)
+            planner.process_agent_questions()
+
             if self.__run_matrx_api and api._matrx_done:
                 is_done = True
 
@@ -456,60 +473,6 @@ class GridWorld:
                 phase = NEEDS_SUMMARIZATION
 
         return planner.iteration_history
-
-    def _serialize_state_for_llm(self, world_state):
-        """
-        Convert MATRX world state to a text summary for LLM consumption.
-
-        Filters to only relevant objects: agents, victims, obstacles, doors.
-        """
-        summary_parts = []
-
-        for obj_id, obj_data in world_state.items():
-            if obj_id == 'World':
-                summary_parts.append(f"Tick: {obj_data.get('nr_ticks', 0)}")
-                continue
-
-            if obj_id in self.registered_agents:
-                is_human = self.registered_agents[obj_id].is_human_agent
-                label = 'human-controlled' if is_human else 'LLM-based'
-                carrying = world_state[obj_id].get('is_carrying', [])
-                summary_parts.append(f"Agent {obj_id} ({label}) at {world_state[obj_id]['location']} carrying={carrying}")
-
-            if not isinstance(obj_data, dict):
-                continue
-
-            name = obj_data.get('name', obj_id)
-            if name == 'street':
-                continue
-            location = obj_data.get('location', 'unknown')
-            class_chain = str(obj_data.get('class_inheritance', []))
-            img_name = str(obj_data.get('img_name', ''))
-
-            # Victims (collectable blocks)
-            if obj_data.get('is_collectable', False):
-                victim_type = 'unknown'
-                if 'critical' in img_name.lower():
-                    victim_type = 'critically injured'
-                elif 'mild' in img_name.lower():
-                    victim_type = 'mildly injured'
-                elif 'healthy' in img_name.lower():
-                    victim_type = 'healthy'
-                summary_parts.append(f"Victim '{name}' ({victim_type}) at {location}")
-
-            # Obstacles
-            elif any(obs in str(obj_id).lower() for obs in ['rock', 'stone', 'tree']):
-                summary_parts.append(f"Obstacle '{name}' at {location}")
-
-            # Closed doors
-            elif 'door' in str(obj_id).lower():
-                is_open = obj_data.get('is_open', True)
-                if not is_open:
-                    summary_parts.append(f"Closed door '{name}' at {location}")
-                else:
-                    summary_parts.append(f"Open door '{name}' at {location}")
-        # print("\n".join(summary_parts))
-        return "\n".join(summary_parts) if summary_parts else "No relevant objects visible"
 
 #### HELPER
     def _send_planner_message_to_human(self, task_msg, agents):
@@ -1336,6 +1299,91 @@ class GridWorld:
 
     def __warn(self, warn_str):
         return f"[@{self.__current_nr_ticks}] {warn_str}"
+    
+    def process_map_to_dict(self, state) -> dict:
+        if state is None:
+            return None
+
+        memory = {
+            'victims': [],
+            'obstacles': [],
+            'doors': [],
+            'team_positions': {},
+        }
+
+        # Identify all agent IDs (AI + human) from GridWorld's own registry.
+        # registered_agents is a @property on GridWorld — no external attributes needed.
+        agent_ids   = set(self.registered_agents.keys())
+        human_names = {aid for aid, ab in self.registered_agents.items()
+                       if ab.is_human_agent}
+
+        # --- Agent / teammate positions ---
+        for obj_id in agent_ids:
+            obj_data = state.get(obj_id)
+            if isinstance(obj_data, dict):
+                loc = obj_data.get('location')
+                if loc is not None:
+                    memory['team_positions'][obj_id] = list(loc)
+
+        # --- Classify and store world objects ---
+        skip_ids = agent_ids | {'World'}
+        for obj_id, obj_data in state.items():
+            if obj_id in skip_ids:
+                continue
+            if not isinstance(obj_data, dict):
+                continue
+            loc = obj_data.get('location')
+            if loc is None:
+                continue
+
+            typ = _classify_object_type(obj_id, obj_data)
+            if typ is None:
+                continue
+
+            pos = list(loc)
+
+            # --- Victims ---
+            if typ in ('crit', 'mild', 'healthy'):
+                victim_type = {'crit': 'critical', 'mild': 'mild', 'healthy': 'healthy'}[typ]
+                area = obj_data.get('area', 'unknown')
+                existing = next(
+                    (v for v in memory['victims'] if v['id'] == obj_id), None
+                )
+                if existing is None:
+                    memory['victims'].append({
+                        'id': obj_id, 'type': victim_type, 'area': area,
+                    })
+                else:
+                    existing['area'] = area
+
+            # --- Obstacles ---
+            elif typ in ('rock', 'stone', 'tree'):
+                obstacle_type = {'rock': 'big_rock', 'stone': 'stone', 'tree': 'tree'}[typ]
+                existing = next(
+                    (o for o in memory['obstacles'] if o['id'] == obj_id), None
+                )
+                if existing is None:
+                    memory['obstacles'].append({
+                        'id': obj_id, 'type': obstacle_type, 'location': pos,
+                    })
+                else:
+                    existing['location'] = pos
+
+            # --- Doors (area entrances) ---
+            elif typ in ('door_open', 'door_closed'):
+                area_id = (str(obj_id).split('_-_door')[0]
+                           if '_-_door' in str(obj_id) else str(obj_id))
+                existing = next(
+                    (d for d in memory['doors'] if d['id'] == area_id), None
+                )
+                if existing is None:
+                    memory['doors'].append({'id': area_id, 'door': pos})
+                else:
+                    existing['door'] = pos
+
+        return memory
+
+   
 
 
     @property

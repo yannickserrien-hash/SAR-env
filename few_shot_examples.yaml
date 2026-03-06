@@ -1,0 +1,152 @@
+# Few-shot examples for LLM prompts.
+
+# ── Per-tick action decision (ReasoningModule / reason_system) ─────────────────
+reasoning:
+  # Example — uncomment and edit:
+  - user: |
+      TASK: Navigate to room entrance at [5, 3]
+      POS: [3, 3]  CARRYING: nothing
+      NEARBY: {"stone_1": {"type": "stone", "location": [4, 3]}}
+      LAST_ACTION: MoveTo [4, 3]
+    assistant: |
+      {"action": "RemoveObject", "params": {"object_id": "stone_1"}}
+  
+  - user: |
+      TASK: Remove obstacle at [9, 2]
+      POS: [8, 6]  CARRYING: nothing
+      NEARBY: None
+      LAST_ACTION: MoveTo [8, 6]
+    assistant: |
+      {"action": "MoveTo", "params": {"x": 9, "y": 2}}
+    
+  - user: |
+      TASK: Rescue critical victim victim_3 at [8, 6]
+      POS: [8, 6]  CARRYING: nothing
+      NEARBY: {"victim_3": {"type": "critical_victim", "location": [8, 6]}, "humanagent": {"location": [8, 7]}}
+      LAST_ACTION: MoveTo [8, 6]
+    assistant: |
+      {"action": "CarryObjectTogether", "params": {"object_id": "victim_3"}}
+
+
+# ── Task planning (EnginePlanner / generate_tasks_system) ─────────────────────
+generate_tasks:
+  - user: |
+      door_houses[4]{id,door}:
+      area_1,"[3, 4]"
+      area_2,"[9, 4]"
+      area_3,"[15, 4]"
+      area_4,"[21, 4]"
+      known_obstacles[1]{id,type,location}:
+        rock,big_rock,"[3, 4]"
+      teammate_positions:
+      rescuebot1[2]: 21,11
+      rescuebot0[2]: 22,11
+      AGENTS:
+      - rescuebot0 (LLM-based)
+      - rescuebot1 (LLM-based)
+      PREVIOUS_PLAN: None
+  
+      Assign one task per agent.
+    assistant: |
+      {"tasks": {"rescuebot0": "Explore Area 1", "rescuebot1": "Explore Area 2"}}
+
+# ── Plan decomposition (PlanningModule / planning_decompose_system) ───────────
+planning_decompose:
+  - user: |
+      TASK: Rescue victim in area 1.
+      KNOWN WORLD STATE: victims[0]:
+      obstacles[0]:
+      doors[14]{id,door}:
+        area_1,"[3, 4]"
+        area_2,"[9, 4]"
+        area_3,"[15, 4]"
+        area_4,"[21, 4]"
+        area_5,"[3, 7]"
+        area_6,"[9, 7]"
+        area_7,"[15, 7]"
+        area_8,"[3, 16]"
+        area_9,"[9, 16]"
+        area_10,"[15, 16]"
+        area_11,"[3, 19]"
+        area_12,"[9, 19]"
+        area_13,"[15, 19]"
+        area_14,"[21, 19]"
+      help_requests[0]:
+      teammate_positions:
+        rescuebot0[2]: 22,11
+      MEMORY: None
+
+    assistant: |
+      Subtask1: Go to the door of Area 1 at [3, 4], as found in the world state-doors.
+      Subtask2: Remove any obstacle blocking the door if present (not mentioned in world state, so may or may not be there).
+      Subtask3: Search Area 1 for victims.
+      Subtask4: Move next to the victim and carry it
+      Subtask5: Navigate to the drop zone
+      Subtask6: Drop the victim at the drop zone
+
+
+# ── Plan evaluation (PlanningModule / planning_evaluate_system) ───────────────
+planning_evaluate:
+  []
+  # Example — uncomment and edit:
+  # - user: |
+  #     ORIGINAL TASK: Rescue mild victim victim_2 at [10, 4]
+  #     EXECUTED SUBTASKS: [MoveTo [10,4], CarryObject victim_2, NavigateToDropZone, Drop victim_2]
+  #     CURRENT WORLD STATE: {"known_victims": [{"id":"victim_2","type":"mild","location":[23,8],"rescued":true}]}
+  #     MEMORY: victim_2 delivered tick 55
+  #   assistant: |
+  #     {"success": true, "reason": "victim_2 was carried and dropped at drop zone (23,8)"}
+
+
+# ── Outbound message generation (CommunicationModule / comm_generate_system) ──
+communication:
+  - user: |
+      Type: Help Request (tick 42)
+      Location needing help: [8, 6]
+      Action required: CarryObjectTogether
+      Object: victim_3
+      Context: critical victim, need both agents
+    assistant: |
+      {"message": "[HelpRequest] Need cooperative carry at [8,6] for critical victim_3. Please come immediately."}
+
+
+# ── Inbound message parsing (CommunicationModule / comm_inbound_system) ───────
+comm_inbound:
+  - user: |
+      Parse these messages and extract useful information:
+      [t=42] rescuebot0: [HelpRequest] Need cooperative carry at [8,6] for critical victim_3.
+    assistant: |
+      {"entries": [{"type": "intel_help_requested", "detail": "cooperative carry needed for victim_3", "location": [8, 6]}]}
+
+
+# ── Planner answering agent questions (EnginePlanner / answer_question_*) ─────
+planner_answer:
+  - user: |
+      AGENT: rescuebot0
+      QUESTION: I found a big rock blocking the entrance to area 3. Should I wait for help or explore elsewhere?
+      AGENT CONTEXT: {"position": [14, 4], "task": "Explore Area 3", "memory_summary": "explored areas 1, 2"}
+      CURRENT TASKS: {"rescuebot0": "Explore Area 3", "rescuebot1": "Rescue victim_1 in Area 1"}
+      LAST SUMMARY: Iteration 2: rescuebot0 explored Areas 1-2, found 2 mild victims. rescuebot1 rescued victim_1.
+      SCORE: Victims rescued: 1/8, Score: 3, Block hit rate: 0.12
+      ITERATION: 3
+    assistant: |
+      The rock at Area 3 needs cooperative removal. rescuebot1 is busy rescuing in Area 1 — skip Area 3 for now and explore Area 4 at [21, 4] instead. We will coordinate rock removal next iteration.
+
+# ── Direct message generation (CommunicationModule / comm_direct_*) ──────────
+direct_message:
+  - user: |
+      Type: Direct Message (tick 85)
+      Target: rescuebot1
+      Intent: I found a critical victim in area 5 and need help carrying it
+      Context: victim_4 at [4, 8], critical severity
+    assistant: |
+      {"message": "[t=85] I found critical victim_4 at [4,8] in area 5. Need your help for cooperative carry. Can you come over?"}
+
+# ── Memory extraction (RescueAgent / memory_extract_*) ───────────────────────
+memory_extract:
+  - user: |
+      ACTION: CarryObject victim_2
+      RESULT: success — now carrying victim_2
+      OBSERVATION: {"agent": {"location": [10, 4], "carrying": ["victim_2"]}}
+    assistant: |
+      {"entries": [{"type": "victim_found", "victim_id": "victim_2", "location": [10, 4], "severity": "mild", "tick": 55}]}

@@ -1,5 +1,6 @@
 import copy
 import json
+import random
 import warnings
 
 import numpy as np
@@ -504,7 +505,7 @@ class AgentBrain:
         self.action_set = action_set
 
         # Setting the random seed and rng
-        self.rnd_seed = rnd_seed
+        self.rnd_seed = random.randint(1, 1000000)  # --- IGNORE ---
         self._set_rnd_seed(seed=rnd_seed)
 
         # Initializing the State object

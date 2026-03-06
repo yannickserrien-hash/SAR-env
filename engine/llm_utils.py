@@ -5,14 +5,55 @@ Supports Ollama (local) via HTTP API at http://localhost:11434.
 """
 
 import json
+import os
 import re
+import random
 import logging
 import threading
 import concurrent.futures
 import requests
-from typing import Optional
+from typing import Optional, List, Dict
 
 OLLAMA_BASE_URL = "http://localhost:11434"
+
+# ── Few-shot loader ─────────────────────────────────────────────────────────
+_FEW_SHOT_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), 'few_shot_examples.yaml'
+)
+_few_shot_cache: Optional[Dict] = None
+
+
+def load_few_shot(key: str) -> List[Dict]:
+    """Return few-shot messages for *key* from few_shot_examples.yaml.
+
+    Returns a list of {"role": "user"/"assistant", "content": str} dicts
+    ready to be injected between the system message and the real user prompt.
+    Returns [] if the key is absent, empty, or the file is missing.
+    """
+    global _few_shot_cache
+    if _few_shot_cache is None:
+        try:
+            import yaml
+            with open(_FEW_SHOT_FILE, 'r') as f:
+                _few_shot_cache = yaml.safe_load(f) or {}
+        except FileNotFoundError:
+            logging.getLogger('llm_utils').warning(
+                "few_shot_examples.yaml not found at %s", _FEW_SHOT_FILE
+            )
+            _few_shot_cache = {}
+        except Exception as e:
+            logging.getLogger('llm_utils').warning(
+                "Failed to load few_shot_examples.yaml: %s", e
+            )
+            _few_shot_cache = {}
+
+    examples = _few_shot_cache.get(key) or []
+    messages = []
+    for ex in examples:
+        if isinstance(ex, dict) and 'user' in ex and 'assistant' in ex:
+            messages.append({"role": "user", "content": ex['user'].strip()})
+            messages.append({"role": "assistant", "content": ex['assistant'].strip()})
+    return messages
 
 logger = logging.getLogger('llm_utils')
 
@@ -49,44 +90,56 @@ def query_llm(
     model: str,
     system_prompt: str,
     user_prompt: str,
-    max_tokens: int = 1000,
-    temperature: float = 0.1,
-    api_url: str = None
+    max_tokens: int = 5000,
+    temperature: float = 0.4,
+    api_url: str = None,
+    few_shot_messages: Optional[List[Dict]] = None,
 ) -> Optional[str]:
     """
     Query an LLM via Ollama's chat API.
-
-    Args:
-        model: Model name (e.g., 'llama3:8b')
-        system_prompt: System message
-        user_prompt: User message
-        max_tokens: Maximum tokens in response
-        temperature: Sampling temperature
-        api_url: Ollama base URL (e.g. 'http://localhost:11435'). Defaults to OLLAMA_BASE_URL.
-
-    Returns:
-        Response text string, or None if the call fails
     """
     base_url = api_url or OLLAMA_BASE_URL
+    # messages = [{"role": "system", "content": system_prompt}]
+    # if few_shot_messages:
+    #     messages.extend(few_shot_messages)
+    # messages.append({"role": "user", "content": user_prompt})
+    prompt_parts = []
+
+    if system_prompt:
+        prompt_parts.append(f"\n{system_prompt.strip()}")
+
+    if few_shot_messages:
+        for msg in few_shot_messages:
+            role = msg.get("role")
+            content = msg.get("content", "").strip()
+            if role == "user":
+                prompt_parts.append(f"\n{content}")
+            elif role == "assistant":
+                prompt_parts.append(f":\n{content}")
+
+    prompt_parts.append(f":\n{user_prompt.strip()}")
+    prompt_parts.append(":\n")
+
+    full_prompt = "\n".join(prompt_parts)
+
+
     try:
         response = requests.post(
-            f"{base_url}/api/chat",
+            f"{base_url}/api/generate",
             json={
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+                "prompt": full_prompt,
                 "stream": False,
+                # "keep_alive": 0,
                 "options": {
                     "num_predict": max_tokens,
-                    "temperature": temperature
-                }
+                    "temperature": temperature,
+            }
             },
             timeout=60
         )
         response.raise_for_status()
-        return response.json()["message"]["content"]
+        return response.json()["response"]
     except requests.exceptions.ConnectionError:
         logger.error("Cannot connect to Ollama at %s. Is it running?", base_url)
         return None
@@ -103,8 +156,9 @@ def query_llm_async(
     system_prompt: str,
     user_prompt: str,
     max_tokens: int = 5000,
-    temperature: float = 0.1,
-    api_url: str = None
+    temperature: float = 0.4,
+    api_url: str = None,
+    few_shot_messages: Optional[List[Dict]] = None,
 ) -> concurrent.futures.Future:
     """
     Submit an LLM query to the background thread pool and return immediately.
@@ -117,7 +171,6 @@ def query_llm_async(
     thread managed by _llm_executor.
     """
     print("LLM queried")
-    print(user_prompt)
     return _get_executor().submit(
         query_llm,
         model,
@@ -125,7 +178,8 @@ def query_llm_async(
         user_prompt,
         max_tokens,
         temperature,
-        api_url
+        api_url,
+        few_shot_messages,
     )
 
 
@@ -148,8 +202,6 @@ def parse_json_response(text: str) -> Optional[dict]:
 
     if not text:
         return None
-
-    print("[JSON:] " + text)
 
     # 1. Fenced ```json block
     match = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)

@@ -16,18 +16,12 @@ import logging
 import concurrent.futures
 from typing import Any, Dict, List, Optional
 
-from engine.llm_utils import query_llm_async, parse_json_response
+from engine.llm_utils import query_llm_async, parse_json_response, load_few_shot
 
 logger = logging.getLogger('CommunicationModule')
 
 
 class CommunicationModule:
-    """Non-blocking communication module for RescueAgent.
-
-    Uses a single generate_message() method for all outbound message types.
-    The Reasoning Module decides when to communicate via LLM actions;
-    this module handles the async message generation and delivery.
-    """
 
     MAX_INBOUND_BATCH = 5
 
@@ -37,26 +31,12 @@ class CommunicationModule:
         prompts: dict,
         agent_id: str,
         send_message_fn,
-        memory,
-        world_memory: Optional[Dict[str, Any]] = None,
         api_url: str = None,
     ):
-        """
-        Args:
-            llm_model: Ollama model name (e.g. 'llama3:8b').
-            prompts: YAML prompt dict (from prompts_rescue_agent.yaml).
-            agent_id: This agent's MATRX ID.
-            send_message_fn: Reference to RescueAgent._send_message(content, sender).
-            memory: Reference to RescueAgent.memory (ShortTermMemory).
-            world_memory: Reference to RescueAgent.MEMORY (structured world-knowledge dict).
-            api_url: Ollama base URL for this agent (None = default).
-        """
         self._llm_model = llm_model
         self._prompts = prompts
         self._agent_id = agent_id
         self._send_message = send_message_fn
-        self._memory = memory
-        self._world_memory = world_memory
         self._api_url = api_url
 
         # Outbound: list of pending futures (supports concurrent messages)
@@ -88,20 +68,50 @@ class CommunicationModule:
             model=self._llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=120,
-            temperature=0.2,
             api_url=self._api_url,
+            few_shot_messages=load_few_shot('communication'),
         )
-        self._outbound_futures.append(future)
+        self._outbound_futures.append((future, None))
+
+    def generate_direct_message(self, target_agent_id: str, tick: int,
+                                message_intent: str, context: str = '') -> None:
+        """Submit an async LLM call to generate a direct message to a specific agent."""
+        system_prompt = self._prompts.get('comm_direct_system', '').format()
+        user_template = self._prompts.get('comm_direct_user', '')
+        try:
+            user_prompt = user_template.format(
+                tick=tick,
+                target_agent=target_agent_id,
+                message_intent=message_intent,
+                context=context,
+            )
+        except KeyError as e:
+            logger.warning(f"Missing prompt variable {e} for comm_direct_user")
+            return
+
+        future = query_llm_async(
+            model=self._llm_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            api_url=self._api_url,
+            few_shot_messages=load_few_shot('communication'),
+        )
+        self._outbound_futures.append((future, target_agent_id))
 
     def poll_outbound(self) -> None:
         """Harvest completed outbound futures and send messages.
 
         Called every tick. Iterates all pending futures, sends messages
         for completed ones, keeps pending ones for the next tick.
+        Supports targeted messages via (future, target_id) tuples.
         """
         still_pending = []
-        for future in self._outbound_futures:
+        for item in self._outbound_futures:
+            if isinstance(item, tuple):
+                future, target_id = item
+            else:
+                future, target_id = item, None
+
             if future.done():
                 try:
                     raw = future.result()
@@ -114,28 +124,31 @@ class CommunicationModule:
                         msg_text = None
 
                     if msg_text:
-                        self._send_message(msg_text, self._agent_id)
-                        logger.info(f"Sent message: {msg_text[:80]}")
+                        self._send_message(msg_text, self._agent_id, target_id=target_id)
+                        kind = 'direct' if target_id else 'broadcast'
+                        logger.info(f"Sent {kind} message: {msg_text[:80]}")
                 except Exception as e:
                     logger.warning(f"Outbound message future failed: {e}")
             else:
-                still_pending.append(future)
+                still_pending.append(item)
         self._outbound_futures = still_pending
 
     # ------------------------------------------------------------------
     # Inbound: parse incoming messages for actionable intelligence
     # ------------------------------------------------------------------
 
-    def poll_inbound(self, received_messages: list) -> None:
+    def poll_inbound(self, received_messages: list, action_count: int = 0) -> None:
         """Process new inbound messages via async LLM parsing.
 
         Called every tick. Checks for new messages since last processing,
         submits them to the LLM for extraction, and writes results to memory.
+        LLM parse submissions are gated to every 5 completed actions to reduce cost.
 
         Args:
             received_messages: RescueAgent.received_messages (list of Message).
+            action_count: Number of completed actions so far (for gating LLM calls).
         """
-        # Harvest completed inbound future
+        # Harvest completed inbound future (free — no LLM call, just polling)
         if self._inbound_future is not None and self._inbound_future.done():
             try:
                 raw = self._inbound_future.result()
@@ -172,9 +185,8 @@ class CommunicationModule:
             model=self._llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=300,
-            temperature=0.1,
             api_url=self._api_url,
+            few_shot_messages=load_few_shot('comm_inbound'),
         )
 
     def _process_parsed_inbound(self, parsed: dict) -> None:

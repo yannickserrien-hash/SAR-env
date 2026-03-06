@@ -112,8 +112,6 @@ class LongTermMemory(BaseMemory):
             llm_model="gpt-3.5-turbo",
             messages=[{"role": "system", "content": prompt}],
             return_num=1,
-            max_token_num=512,
-            temperature=0.0,
             top_p=None,
             stream=None,
         )[0]

@@ -53,7 +53,6 @@ if __name__ == "__main__":
         max_iterations=50,
         score_file=score_file,
         llm_model='llama3:8b',
-        task_description='',  # Uses DEFAULT_TASK_DESCRIPTION from engine_planner.py
         ticks_per_iteration=ticks_per_iteration,
         include_human=include_human,
         api_url=f"http://localhost:{ollama_base_port}"
