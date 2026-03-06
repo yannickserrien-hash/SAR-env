@@ -14,7 +14,6 @@ import logging
 import threading
 import concurrent.futures
 from typing import List, Optional, Tuple, Dict, Any
-import random
 import os
 import yaml
 from engine.toon_utils import to_toon
@@ -111,6 +110,11 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         # Agent ↔ Planner communication
         self._planner_channel = None
         self._planner_responses: list = []  # recent planner response strings
+        self._planning_question_submitted = False  # prevents re-submitting same question
+
+        # Mid-iteration re-tasking: callback injected by GridWorld, future for the LLM call
+        self._request_task_callback = None   # callable() -> Future; set by run_with_planner
+        self._retask_future: Optional[concurrent.futures.Future] = None
 
     def initialize(self):
         """Initialize all components when world starts."""
@@ -192,7 +196,11 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         # Reset planning state and trigger task decomposition
         self._completed_action_count = 0
         self._planning_in_progress = True
-        self.PLAN = ''       
+        self.PLAN = ''
+        self._planning_question_submitted = False
+        self._retask_future = None
+        if self.planning_module is not None:
+            self.planning_module.reset()
 
     def filter_observations(self, state: State) -> State:
         """
@@ -229,45 +237,102 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
         # Configs
         self._state_tracker.update(self.state_for_navigation)
-        
+
         # Process observation
         self.WORLD_STATE_FILTERED = self.process_observations(filtered_state)
         self.OBS = self.observation_to_dict(filtered_state)
-        
+
         self._last_filtered_state = filtered_state
-        
+
+        # ===== Task completion re-tasking =====
+        # If a re-task future is pending, poll it
+        if self._retask_future is not None:
+            if self._retask_future.done():
+                try:
+                    task_result = self._retask_future.result()
+                    agent_tasks = task_result.get('agent_tasks', {})
+                    new_task = agent_tasks.get(
+                        self.agent_id,
+                        task_result.get('rescuebot_task', 'explore nearest area')
+                    )
+                    print(f"[{self.agent_id}] Re-tasked: {new_task}")
+                    self.set_current_task(new_task)
+                except Exception as e:
+                    self._logger.warning(f"[{self.agent_id}] Re-task failed: {e}")
+                    self._retask_future = None
+            else:
+                # Still waiting for new task from planner
+                return Idle.__name__, {'duration_in_ticks': 1}
+
+        # ===== No task =====
+        if not self._current_task:
+            return Idle.__name__, {'duration_in_ticks': 1}
+
+        # ===== Planning phase =====
+
+        # 1. Trigger initial plan decomposition (once per task)
         if self._planning_in_progress and self.PLAN == '':
             self.planning_module.plan(
                 task=self._current_task,
                 world_state=to_toon(self.WORLD_STATE_FILTERED),
-                memory=self.short_term_memory.get_compact_str()[:400] if self.short_term_memory.storage else '',
+                memory=self.short_term_memory.get_compact_str()[:400]
+                    if self.short_term_memory.storage else '',
             )
             self._planning_in_progress = False
-        
-        # Check if PlanningModule generated a plan
-        if self.planning_module.is_plan_ready():
-            print(self.planning_module.get_plan)
-            if "AskPlanner" in self.planning_module.get_plan:
-                self._reasoning_step = False
-                self.text_to_action(self.planning_module.get_plan)
-            else:
-                self._reasoning_step = True
-                self.PLAN = self.planning_module.get_plan
 
-        # If no task assigned yet, move to a random direction to explore
-        if not self._current_task or not self.planning_module.plan_ready:
-            action = random.choice(['MoveNorth', 'MoveEast', 'MoveSouth', 'MoveWest'])
-            return action, {}
-        
+        # 2. Wait for plan if not ready
+        if not self.planning_module.plan_ready and self.PLAN == '':
+            # Poll the planning LLM future
+            self.planning_module.is_plan_ready()
+
+            # Handle "AskPlanner" — needs clarification from EnginePlanner
+            if self.planning_module.needs_clarification:
+                # Submit question to planner channel (once per question)
+                if self._planner_channel is not None and not self._planning_question_submitted:
+                    question = self.planning_module.get_question()
+                    tick = 0
+                    try:
+                        tick = self.state_for_navigation['World']['nr_ticks']
+                    except (KeyError, TypeError):
+                        pass
+                    self._planner_channel.submit_question(
+                        agent_id=self.agent_id,
+                        content=question,
+                        tick=tick,
+                        context={'task': self._current_task},
+                    )
+                    self._planning_question_submitted = True
+                    print(f"[{self.agent_id}] Asked planner: {question}")
+
+                # Poll for planner's response
+                if self._planner_channel is not None:
+                    responses = self._planner_channel.poll_responses(self.agent_id)
+                    if responses:
+                        answer = responses[0].content
+                        self.planning_module.receive_answer(answer)
+                        self._planning_question_submitted = False
+                        print(f"[{self.agent_id}] Planner answered: {answer[:80]}")
+
+            # Idle while waiting for plan/clarification
+            return Idle.__name__, {'duration_in_ticks': 1}
+
+        # 3. Extract plan once ready
+        if self.PLAN == '' and self.planning_module.plan_ready:
+            self.PLAN = self.planning_module.get_plan
+            self._reasoning_step = True
+            print(f"[{self.agent_id}] Plan ready: {self.PLAN[:120]}")
+
+        # ===== Execution phase =====
+
         # Let Agent finish MoveTo() action
         if self._nav_target is not None:
             move_action = self._navigator.get_move_action(self._state_tracker)
 
-            if move_action is not None: # Still moving to target
+            if move_action is not None:  # Still moving to target
                 print(f"[{self.agent_id}] Navigating to {self._nav_target} | "
-                        f"action={move_action}")
+                      f"action={move_action}")
                 return move_action, {}
-            else: # Stop navigation (arrived or path blocked)
+            else:  # Stop navigation (arrived or path blocked)
                 self._nav_target = None
                 self._reasoning_step = True
 
@@ -277,19 +342,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 self.received_messages,
                 action_count=self._completed_action_count,
             )
-
-        # Poll for planner responses (immediate — every tick)
-        if self._planner_channel is not None:
-            responses = self._planner_channel.poll_responses(self.agent_id)
-            for resp in responses:
-                self._planner_responses.append(resp.content)
-                self._planner_responses = self._planner_responses[-3:]
-                self.short_term_memory.update('planner_response', {
-                    'type': 'planner_response',
-                    'content': resp.content,
-                    'tick': resp.tick,
-                })
-                self._reasoning_step = True  # re-reason with planner's advice
 
         # Get LLM action if reasoning step is done
         with self._llm_lock:
@@ -309,19 +361,19 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         # Submit new LLM call
         if self._reasoning_step:
             with self._llm_lock:
-                if self._pending_llm_action is None and self.planning_module.plan_ready:
+                if self._pending_llm_action is None and self.PLAN:
                     planner_ctx = ""
                     if self._planner_responses:
                         planner_ctx = "\n".join(
                             f"- {r}" for r in self._planner_responses[-2:]
                         )
-                    self.PLAN = self.planning_module.get_plan.split("1.", 1)[1].strip()
                     self._pending_llm_action = self.reasoning_module(
                         self.PLAN,
                         observation=self.OBS,
                         previous_action=self.past_actions,
                         planner_context=planner_ctx,
                     )
+                    self._reasoning_step = False
         return Idle.__name__, {'duration_in_ticks': 1}
 
     def _record_action_in_memory(self, action:str):
@@ -493,6 +545,20 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             move_action = self._navigator.get_move_action(self._state_tracker)
             if move_action is not None:
                 return move_action, {}
+
+        # --- Task completion: request new task from planner ---
+        if action == 'TaskComplete':
+            print(f"[{self.agent_id}] Task completed, requesting new task")
+            if self._request_task_callback is not None:
+                self._retask_future = self._request_task_callback()
+                self._current_task = None
+                self.PLAN = ''
+            else:
+                # No callback — clear task and idle
+                self._current_task = None
+                self.PLAN = ''
+            return Idle.__name__, {'duration_in_ticks': 1}
+
         return Idle.__name__, {'duration_in_ticks': 1}
 
     def _parse_coordinates(self, target) -> Optional[Tuple[int, int]]:
