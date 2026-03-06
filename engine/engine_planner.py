@@ -20,15 +20,13 @@ from typing import List, Dict, Any, Optional
 import yaml
 
 from engine.iteration_data import IterationData
-from engine.llm_utils import query_llm, parse_json_response
+from engine.llm_utils import query_llm, parse_json_response, load_few_shot
+from engine.planner_channel import PlannerChannel, PlannerMessage, PlannerResponse
 
 # Load all LLM prompts from the companion YAML file (once at import time).
 _PROMPTS_FILE = os.path.join(os.path.dirname(__file__), 'prompts_engine_planner.yaml')
 with open(_PROMPTS_FILE, 'r') as _f:
     PROMPTS = yaml.safe_load(_f)
-
-DEFAULT_TASK_DESCRIPTION = PROMPTS['default_task_description'].strip()
-
 
 class EnginePlanner:
     """
@@ -46,7 +44,6 @@ class EnginePlanner:
         max_iterations: int = 100,
         score_file: str = "logs/score.json",
         llm_model: str = 'llama3:8b',
-        task_description: str = '',
         ticks_per_iteration: int = 100,
         include_human: bool = True,
         api_url: str = None
@@ -58,7 +55,6 @@ class EnginePlanner:
             max_iterations: Maximum number of planning iterations
             score_file: Path to score.json for checking termination
             llm_model: Ollama model name for LLM calls
-            task_description: High-level mission description for LLM context
             ticks_per_iteration: Number of MATRX ticks per planning iteration
             include_human: Whether a human agent is present in the simulation
             api_url: Ollama base URL (None = default)
@@ -67,22 +63,141 @@ class EnginePlanner:
         self.score_file = score_file
         self.llm_model = llm_model
         self._api_url = api_url
-        self.task_description = task_description or DEFAULT_TASK_DESCRIPTION
         self.ticks_per_iteration = ticks_per_iteration
         self.include_human = include_human
         self.iteration_history: List[IterationData] = []
         self.logger = logging.getLogger('EnginePlanner')
         self._last_summary = ""
 
-        # Background thread pool for async LLM calls (3 workers: planner + summarizer + prefetch)
+        # Background thread pool for async LLM calls (4 workers: planner + summarizer + prefetch + Q&A)
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=3, thread_name_prefix='planner_worker'
+            max_workers=4, thread_name_prefix='planner_worker'
         )
         # Prefetched task-generation future for the NEXT iteration.
         # Populated at the end of each iteration by submit_summarize().
         self._prefetch_future: Optional[concurrent.futures.Future] = None
         # Cached agent list so prefetch submissions don't need a caller-supplied list.
         self._agents_cache: list = []
+
+        # Agent ↔ Planner communication channel
+        self._planner_channel: Optional[PlannerChannel] = None
+        self._pending_answers: list = []  # list of (PlannerMessage, Future)
+
+    @staticmethod
+    def _strip_location_from_id(task_value):
+        """Remove any '@...' location suffix from target_id inside a task dict.
+
+        The LLM sometimes produces 'victim_1@[3,5]' despite explicit instructions.
+        This strips everything from the '@' onward, leaving only the bare object id.
+        Non-dict task values (e.g. plain strings) are returned unchanged.
+        """
+        if not isinstance(task_value, dict):
+            return task_value
+        raw_id = task_value.get('target_id')
+        if isinstance(raw_id, str) and '@' in raw_id:
+            task_value['target_id'] = raw_id.split('@')[0].strip()
+        return task_value
+
+    # ------------------------------------------------------------------
+    # Agent ↔ Planner communication
+    # ------------------------------------------------------------------
+
+    def set_channel(self, channel: PlannerChannel):
+        """Set the communication channel (called once during setup)."""
+        self._planner_channel = channel
+
+    def _read_score_info(self) -> str:
+        """Read current score data from score.json."""
+        try:
+            with open(self.score_file, 'r') as f:
+                score_data = json.load(f)
+                return (
+                    f"Victims rescued: {score_data.get('victims_rescued', 0)}/"
+                    f"{score_data.get('total_victims', 8)}, "
+                    f"Score: {score_data.get('score', 0)}, "
+                    f"Block hit rate: {score_data.get('block_hit_rate', 0.0):.2f}"
+                )
+        except (FileNotFoundError, json.JSONDecodeError):
+            return "Score data unavailable"
+
+    def _answer_question_sync(self, question: PlannerMessage) -> str:
+        """Answer an agent's question using the planner's broad context.
+
+        Runs synchronously in a background thread.
+        """
+        score_info = self._read_score_info()
+
+        current_tasks = {}
+        if self.iteration_history:
+            current_tasks = self.iteration_history[-1].task_assignments
+        elif self._agents_cache:
+            current_tasks = {getattr(a, 'agent_id', '?'): '(pending)' for a in self._agents_cache}
+
+        system_prompt = PROMPTS['answer_question_system']
+        user_prompt = PROMPTS['answer_question_user'].format(
+            agent_id=question.agent_id,
+            question=question.content,
+            agent_context=json.dumps(question.context, default=str),
+            current_tasks=json.dumps(current_tasks, default=str),
+            last_summary=self._last_summary or "No previous summary.",
+            score_info=score_info,
+            iteration=len(self.iteration_history),
+        )
+
+        response = query_llm(
+            model=self.llm_model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            api_url=self._api_url,
+            max_tokens=500,
+            temperature=0.2,
+        )
+        return response or "Unable to answer at this time."
+
+    def process_agent_questions(self) -> None:
+        """Drain agent questions, submit LLM answers, post completed responses.
+
+        Called every tick from run_with_planner(). Non-blocking.
+        """
+        if self._planner_channel is None:
+            return
+
+        # Drain new questions and submit to executor immediately
+        new_questions = self._planner_channel.drain_questions()
+        for q in new_questions:
+            future = self._executor.submit(self._answer_question_sync, q)
+            self._pending_answers.append((q, future))
+            self.logger.info(
+                f"[Planner] Processing question from {q.agent_id}: {q.content[:80]}"
+            )
+
+        # Harvest completed answers and post responses
+        still_pending = []
+        for question, future in self._pending_answers:
+            if future.done():
+                try:
+                    answer_text = future.result()
+                except Exception as e:
+                    answer_text = f"Error processing question: {e}"
+                    self.logger.warning(f"[Planner] Answer future raised: {e}")
+
+                response = PlannerResponse(
+                    msg_id=question.msg_id,
+                    agent_id=question.agent_id,
+                    content=answer_text,
+                    tick=question.tick,
+                )
+                self._planner_channel.post_response(response)
+                self.logger.info(
+                    f"[Planner] Answered {question.agent_id}: {answer_text[:80]}"
+                )
+            else:
+                still_pending.append((question, future))
+        self._pending_answers = still_pending
+
+    # ------------------------------------------------------------------
+    # Task generation
+    # ------------------------------------------------------------------
 
     def _generate_tasks_sync(self, world_state_summary: str, agents: list) -> Dict[str, str]:
         """
@@ -102,17 +217,14 @@ class EnginePlanner:
         agent_lines = []
         for aid in agent_ids:
             agent_lines.append(
-                f"  - {aid} (LLM-based): Can explore areas, carry mildly injured victims alone, "
-                f"remove trees and small stones alone, cooperate with another agent for critical victims and big rocks."
+                f"  - {aid} (LLM-based)"
             )
         agent_ids_formatted = '\n'.join(agent_lines)
-
-        # Build the JSON schema example for the prompt
         agent_tasks_schema = ', '.join(f'"{aid}": "task for {aid}"' for aid in agent_ids)
-        json_schema = f'{{"agent_tasks": {{{agent_tasks_schema}}}'
+
+        json_schema = f'{{"tasks": {{{agent_tasks_schema}}}"'
         if self.include_human:
             json_schema += ', "human_task": "suggested task for human"'
-        json_schema += ', "reasoning": "brief explanation"}'
 
         system_prompt = PROMPTS['generate_tasks_system'].format(
             num_agents=num_agents
@@ -123,43 +235,45 @@ class EnginePlanner:
             human_line = "- Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them."
 
         user_prompt = PROMPTS['generate_tasks_user'].format(
-            task_description=self.task_description,
             world_state_summary=world_state_summary,
             num_agents=num_agents,
+            json_schema = json_schema,
             agent_ids_formatted=agent_ids_formatted,
             human_line=human_line,
-            json_schema=json_schema,
             previous_summary=(
                 self._last_summary if self._last_summary
                 else "This is the first iteration."
             ),
         )
-
+        
         response = query_llm(
             model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=1000,
-            temperature=0.2,
-            api_url=self._api_url
+            api_url=self._api_url,
+            few_shot_messages=load_few_shot('generate_tasks'),
         )
 
         result = parse_json_response(response)
+        print("LLM task generation response:", result)
+
         if result:
             # Accept new format (agent_tasks) or old format (rescuebot_task)
-            if 'agent_tasks' in result:
-                self.logger.info(f"  LLM task generation (per-agent): {result.get('reasoning', '')}")
+            if 'tasks' in result:
+                # Sanitise: strip any "@location" suffix the LLM may have appended to target_id
+                result['tasks'] = {
+                    aid: self._strip_location_from_id(task)
+                    for aid, task in result['tasks'].items()
+                }
                 return result
-            if 'rescuebot_task' in result:
-                self.logger.info(f"  LLM task generation (shared): {result.get('reasoning', '')}")
+            if 'tasks' in result:
                 return result
 
         # Fallback if LLM fails
         self.logger.warning("LLM task generation failed, using fallback")
         fallback = {
-            'agent_tasks': {aid: 'explore nearest unexplored area' for aid in agent_ids},
-            'rescuebot_task': 'explore nearest unexplored area',
-            'reasoning': 'Fallback: LLM unavailable'
+            'agent_tasks': {aid: 'explore area 1 and find victims' for aid in agent_ids},
+            'rescuebot_task': 'explore area 1 and find victims',
         }
         if self.include_human:
             fallback['human_task'] = 'Please explore areas and rescue victims'
@@ -170,19 +284,7 @@ class EnginePlanner:
         """
         Synchronous core of iteration summarization — called inside a background thread.
         """
-        # Read current score data
-        score_info = ""
-        try:
-            with open(self.score_file, 'r') as f:
-                score_data = json.load(f)
-                score_info = (
-                    f"Victims rescued: {score_data.get('victims_rescued', 0)}/"
-                    f"{score_data.get('total_victims', 8)}, "
-                    f"Score: {score_data.get('score', 0)}, "
-                    f"Block hit rate: {score_data.get('block_hit_rate', 0.0):.2f}"
-                )
-        except (FileNotFoundError, json.JSONDecodeError):
-            score_info = "Score data unavailable"
+        score_info = self._read_score_info()
 
         # Build task results text
         task_results_text = ""
@@ -207,9 +309,8 @@ class EnginePlanner:
             model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=1000,
-            temperature=0.1,
-            api_url=self._api_url
+            api_url=self._api_url,
+            few_shot_messages=load_few_shot('summarize'),
         )
 
         if response:

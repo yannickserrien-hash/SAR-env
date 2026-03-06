@@ -9,12 +9,13 @@ This agent implements a modular architecture with clear separation of concerns:
 - Profile: Defines agent identity and capabilities
 """
 
-import enum
 import json
 import logging
 import threading
 import concurrent.futures
 from typing import List, Optional, Tuple, Dict, Any
+import os
+import yaml
 from engine.toon_utils import to_toon
 from matrx.agents.agent_utils.state import State
 from matrx.agents.agent_utils.navigator import Navigator
@@ -23,6 +24,7 @@ from matrx.messages.message import Message
 from agents1.modules.ReasoningModule import ReasoningIO
 from agents1.modules.PerceptionModule import PerceptionModule
 from agents1.modules.CommunicationModule import CommunicationModule
+from agents1.modules.PlanningModule import PlanningModule
 from memory.short_term_memory import ShortTermMemory
 
 from brains1.ArtificialBrain import ArtificialBrain
@@ -36,7 +38,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
     Modular LLM-based agent implementing the target architecture.
 
     Data Flow:
-    Environment State -> filter_observations -> LLM reasoning -> Actions
+    Environment State -> filter_observations -> Planning => Reasoning -> Action
 
     The agent orchestrates the modules and handles low-level execution
     (navigation, pickup, drop) while the LLM handles decision-making.
@@ -55,85 +57,41 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         super().__init__(slowdown, condition, name, folder)
 
         # Configuration
-        self._slowdown = slowdown
-        self._condition = condition
         self._human_name = name
-        self._folder = folder
         self._llm_model = llm_model
         self._include_human = include_human
         self._api_url = f"http://localhost:{ollama_port}"
-        self._intro_done = False
+        self.profile = 'Rescue Agent'
+        self.system_message = None
 
-        self._human_start_location = None
-
-        # Navigation targets (from action decisions)
-        self._target_room: Optional[str] = None
-        self._target_victim: Optional[str] = None
-        self._target_obstacle: Optional[str] = None
-
-        # MATRX components (initialized in initialize())
         self._state_tracker: Optional[StateTracker] = None
         self._navigator: Optional[Navigator] = None
-
-        # Cooperative state
-        self._carrying_together = False
-        self._carrying = False
+        self.state_for_navigation: State = None
+        self._nav_target = None  # (x, y) target from LLM
 
         self.drop_zone_location = (23, 8)
-
-        # Persistent ASCII map: (x,y) -> single char symbol, updated every tick.
-        self._known_cells: dict = {}         # (int,int) -> str
-        self._known_cell_owners: dict = {}   # (int,int) -> obj_id of removable object at that cell
-
-        # Persistent world state: accumulates interesting objects across ticks.
-        # Grouped by type -> list of items.  Types with actionable objects
-        # (victims, obstacles, doors) store {id, pos}; wall/blocked store just [x,y].
-        # _world_state_index maps obj_id -> type for fast lookup / removal.
-        self._world_state: Dict[str, list] = {}
-        self._world_state_index: Dict[str, str] = {}  # obj_id -> type
 
         # Task context from EnginePlanner
         self._current_task = None
 
-        # Hybrid LLM/Navigator: track navigation state
-        self._nav_target = None  # (x, y) target from LLM
-        self._resume_nav_target: Optional[Tuple[int, int]] = None  # re-navigate here after auto-removing obstacle
-
         # Event-driven LLM state machine
         self._reasoning_step = True           # Start by requesting first LLM call
-        self.action_completed = False         # True after a one-shot action was returned to MATRX
-        self._current_llm_action: Optional[dict] = None  # LLM response currently being executed
-        self.last_action = None
+        self.past_actions: list = []   # rolling list of the last 5 executed action strings
 
         # Async LLM state — all access guarded by _llm_lock
-        self._pending_llm_future: Optional[concurrent.futures.Future] = None
+        self._pending_llm_action: Optional[concurrent.futures.Future] = None
         self._last_llm_result: Optional[dict] = None  # most recent valid LLM parse
         self._llm_lock = threading.Lock()
 
-
-        # Mid-iteration re-tasking: callback injected by GridWorld, future for the LLM call
-        self._request_task_callback = None   # callable() -> Future; set by run_with_planner
-        self._retask_future: Optional[concurrent.futures.Future] = None
-
-        self.profile = 'Rescue Agent'
-        # system_message is built in initialize() once prompts are loaded from YAML
-        self.system_message = None
-
-        # Structured short-term memory (LLM-curated, persists across tasks)
-        self.memory = ShortTermMemory(memory_limit=20, llm_model=self._llm_model, api_url=self._api_url)
-        self.agent_graph = [self._human_name]
-
-        # Persistent world-knowledge dict updated every tick via add_new_obs().
-        # Passed directly to the LLM as structured context.
-        self.MEMORY: Dict[str, Any] = {
-            'known_victims': [],       # {"id", "type", "location", "rescued"}
-            'known_obstacles': [],     # {"id", "type", "location"}
-            'door_houses': [],         # {"id", "door"}
-            'pending_help_requests': [],  # {"location", "message", "sender"}
+        self.WORLD_STATE_FILTERED: Dict[str, Any] = {
+            'victims': [],       # {"id", "type", "location"}
+            'obstacles': [],     # {"id", "type", "location"}
+            'doors': [],         # {"id", "door"}
+            'help_requests': [],  # {"location", "message", "sender"}
             'teammate_positions': {},  # {agent_id: [x, y]}
         }
+        self.OBS = {}
         
-        self.state_from_engine: State = None
         # Debug
         self._verbose = True
         self._logger = logging.getLogger('RescueAgent')
@@ -141,38 +99,38 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         # Modules
         self.reasoning_module = None
         self.communication_module = None
+        self.planning_module = None
+        self.short_term_memory = ShortTermMemory(memory_limit=20, llm_model=self._llm_model, api_url=self._api_url)
+        
+        # Planning state
+        self._planning_in_progress = False
+        self._completed_action_count = 0  # counts completed actions for comm gating
+        self.PLAN = ''  # current plan from PlanningModule
 
+        # Agent ↔ Planner communication
+        self._planner_channel = None
+        self._planner_responses: list = []  # recent planner response strings
+        self._planning_question_submitted = False  # prevents re-submitting same question
+
+        # Mid-iteration re-tasking: callback injected by GridWorld, future for the LLM call
+        self._request_task_callback = None   # callable() -> Future; set by run_with_planner
+        self._retask_future: Optional[concurrent.futures.Future] = None
 
     def initialize(self):
         """Initialize all components when world starts."""
-        import os
-        import yaml
+        
+        self._load_prompts()
 
-        # Initialize MATRX components
         self._state_tracker = StateTracker(agent_id=self.agent_id)
+        
         self._navigator = Navigator(
             agent_id=self.agent_id,
             action_set=self.action_set,
             algorithm=Navigator.A_STAR_ALGORITHM
         )
 
-        # Load prompt templates from YAML
-        _prompts_file = os.path.join(
-            os.path.dirname(__file__), 'prompts_rescue_agent.yaml'
-        )
-        with open(_prompts_file, 'r') as f:
-            self._prompts = yaml.safe_load(f)
-
-        # Build system_message from YAML template now that agent_id is available
-        self.system_message = self._prompts['agent_profile_system'].format(
-            agent_id=self.agent_id,
-            profile=self.profile,
-        )
-
         self.reasoning_module = ReasoningIO(
-            profile_type_prompt="",
-            memory=self.memory,
-            llm_model=[self._llm_model],
+            llm_model=self._llm_model,
             prompts=self._prompts,
             api_url=self._api_url,
         )
@@ -182,48 +140,77 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             prompts=self._prompts,
             agent_id=self.agent_id,
             send_message_fn=self._send_message,
-            memory=self.memory,
-            world_memory=self.MEMORY,
             api_url=self._api_url,
         )
 
-    def set_current_task(self, task: str):
-        """Set the current high-level task from the EnginePlanner."""
+        self.planning_module = PlanningModule(
+            llm_model=self._llm_model,
+            prompts=self._prompts,
+            api_url=self._api_url,
+        )
+        
+    def set_planner_channel(self, channel):
+        """Set the PlannerChannel for agent-planner communication."""
+        self._planner_channel = channel
+
+    def _load_prompts(self) -> dict:
+        _prompts_file = os.path.join(
+            os.path.dirname(__file__), 'prompts_rescue_agent.yaml'
+        )
+        with open(_prompts_file, 'r') as f:
+            self._prompts = yaml.safe_load(f)
+            
+        self.system_message = self._prompts['agent_profile_system'].format(
+            agent_id=self.agent_id,
+            profile=self.profile,
+        )
+
+    def set_current_task(self, task):
+        """
+            Set the current high-level task from the EnginePlanner.
+        """
+        # Normalise: EnginePlanner may pass a dict instead of a plain string
+        if not isinstance(task, str):
+            task = json.dumps(task, default=str)
         self._current_task = task
-        print(f"[{self.agent_id}] Acting on task '{task}'.")
-        self._send_message(f"[{self.agent_id}] Received task: {task}", self.agent_id)
 
         # Record task assignment in memory (persists across tasks)
         tick = 0
-        if self.state_from_engine is not None:
+        if self.state_for_navigation is not None:
             try:
-                tick = self.state_from_engine['World']['nr_ticks']
+                tick = self.state_for_navigation['World']['nr_ticks']
             except (KeyError, TypeError):
                 pass
-        self.memory.update('task', {
+        self.short_term_memory.update('task', {
             'task': task,
             'tick': tick,
         })
 
         # Reset navigation and LLM state for new task (memory is NOT reset)
         self._nav_target = None
-        self._resume_nav_target = None
-        self._reasoning_step = True
-        self.action_completed = False
-        self._current_llm_action = None
+        self._reasoning_step = False
         with self._llm_lock:
-            self._pending_llm_future = None
+            self._pending_llm_action = None
             self._last_llm_result = None
-        self._retask_future = None  # discard any pending re-task when a new task arrives
+
+        # Reset planning state and trigger task decomposition
+        self._completed_action_count = 0
+        self._planning_in_progress = True
+        self.PLAN = ''
+        self._planning_question_submitted = False
+        self._retask_future = None
+        if self.planning_module is not None:
+            self.planning_module.reset()
 
     def filter_observations(self, state: State) -> State:
         """
         Filter observations to only include objects within 1 block (Chebyshev distance).
+        Door objects are always included regardless of distance. The agent's own state and the World state are also always included.
+        This is called automatically and decide_on_actions receives the filtered state. 
         """
-        agent_info = state[self.agent_id]
-        agent_location = agent_info['location']
+        agent_location = state[self.agent_id]['location']
 
-        self.state_from_engine = state.copy()
+        self.state_for_navigation = state.copy()
         filtered_state = state.copy()
 
         ids_to_include = set()
@@ -247,80 +234,156 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
         return filtered_state
 
-    def decide_on_actions(self, state: State) -> Tuple[Optional[str], Dict]:
-        """
-            Agent Brain.
-        """
+    def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
+        # Configs
+        self._state_tracker.update(self.state_for_navigation)
+
         # Process observation
-        self.MEMORY = self.observation_to_json(state)
-  
-        self._state_tracker.update(self.state_from_engine)
-        self._last_filtered_state = state
-        
-        if self.communication_module is not None:
-            self.communication_module.poll_outbound()
-            self.communication_module.poll_inbound(self.received_messages)
+        self.WORLD_STATE_FILTERED = self.process_observations(filtered_state)
+        self.OBS = self.observation_to_dict(filtered_state)
 
-        if self.action_completed:
-            self.action_completed = False
-            self._reasoning_step = True
+        self._last_filtered_state = filtered_state
 
-        agent_loc = state[self.agent_id]['location']
+        # ===== Task completion re-tasking =====
+        # If a re-task future is pending, poll it
+        if self._retask_future is not None:
+            if self._retask_future.done():
+                try:
+                    task_result = self._retask_future.result()
+                    agent_tasks = task_result.get('agent_tasks', {})
+                    new_task = agent_tasks.get(
+                        self.agent_id,
+                        task_result.get('rescuebot_task', 'explore nearest area')
+                    )
+                    print(f"[{self.agent_id}] Re-tasked: {new_task}")
+                    self.set_current_task(new_task)
+                except Exception as e:
+                    self._logger.warning(f"[{self.agent_id}] Re-task failed: {e}")
+                    self._retask_future = None
+            else:
+                # Still waiting for new task from planner
+                return Idle.__name__, {'duration_in_ticks': 1}
 
-        # If no task assigned yet, idle
+        # ===== No task =====
         if not self._current_task:
             return Idle.__name__, {'duration_in_ticks': 1}
+
+        # ===== Planning phase =====
+
+        # 1. Trigger initial plan decomposition (once per task)
+        if self._planning_in_progress and self.PLAN == '':
+            self.planning_module.plan(
+                task=self._current_task,
+                world_state=to_toon(self.WORLD_STATE_FILTERED),
+                memory=self.short_term_memory.get_compact_str()[:400]
+                    if self.short_term_memory.storage else '',
+            )
+            self._planning_in_progress = False
+
+        # 2. Wait for plan if not ready
+        if not self.planning_module.plan_ready and self.PLAN == '':
+            # Poll the planning LLM future
+            self.planning_module.is_plan_ready()
+
+            # Handle "AskPlanner" — needs clarification from EnginePlanner
+            if self.planning_module.needs_clarification:
+                # Submit question to planner channel (once per question)
+                if self._planner_channel is not None and not self._planning_question_submitted:
+                    question = self.planning_module.get_question()
+                    tick = 0
+                    try:
+                        tick = self.state_for_navigation['World']['nr_ticks']
+                    except (KeyError, TypeError):
+                        pass
+                    self._planner_channel.submit_question(
+                        agent_id=self.agent_id,
+                        content=question,
+                        tick=tick,
+                        context={'task': self._current_task},
+                    )
+                    self._planning_question_submitted = True
+                    print(f"[{self.agent_id}] Asked planner: {question}")
+
+                # Poll for planner's response
+                if self._planner_channel is not None:
+                    responses = self._planner_channel.poll_responses(self.agent_id)
+                    if responses:
+                        answer = responses[0].content
+                        self.planning_module.receive_answer(answer)
+                        self._planning_question_submitted = False
+                        print(f"[{self.agent_id}] Planner answered: {answer[:80]}")
+
+            # Idle while waiting for plan/clarification
+            return Idle.__name__, {'duration_in_ticks': 1}
+
+        # 3. Extract plan once ready
+        if self.PLAN == '' and self.planning_module.plan_ready:
+            self.PLAN = self.planning_module.get_plan
+            self._reasoning_step = True
+            print(f"[{self.agent_id}] Plan ready: {self.PLAN[:120]}")
+
+        # ===== Execution phase =====
 
         # Let Agent finish MoveTo() action
         if self._nav_target is not None:
             move_action = self._navigator.get_move_action(self._state_tracker)
 
-            if move_action is not None: # Still moving to target
+            if move_action is not None:  # Still moving to target
                 print(f"[{self.agent_id}] Navigating to {self._nav_target} | "
-                        f"pos={agent_loc} | action={move_action}")
-                
+                      f"action={move_action}")
                 return move_action, {}
-            else: # Arrived at target or stuck 
+            else:  # Stop navigation (arrived or path blocked)
                 self._nav_target = None
-                self._current_llm_action = None
                 self._reasoning_step = True
 
-        # --- Do action ---
-        if self._last_llm_result is not None:
-            self._current_llm_action = self._last_llm_result
-            self._last_llm_result = None
-            return self.text_to_action(self._current_llm_action)
-        
-        # --- Get Reasoning Module response (Async) ---
+        if self.communication_module is not None:
+            self.communication_module.poll_outbound()
+            self.communication_module.poll_inbound(
+                self.received_messages,
+                action_count=self._completed_action_count,
+            )
+
+        # Get LLM action if reasoning step is done
         with self._llm_lock:
-            if self._pending_llm_future is not None and self._pending_llm_future.done():
+            if self._pending_llm_action is not None and self._pending_llm_action.done():
                 try:
-                    self._last_llm_result = self._pending_llm_future.result()
+                    self._last_llm_result = self._pending_llm_action.result()
                 except Exception as e:
                     self._logger.warning(f"[{self.agent_id}] LLM future raised: {e}")
                 finally:
-                    self._pending_llm_future = None
+                    self._pending_llm_action = None
 
-        # --- Reasoning step (LLM via ReasoningModule) ---
+        if self._last_llm_result is not None:
+            action = self._last_llm_result
+            self._last_llm_result = None
+            return self.text_to_action(action)
+
+        # Submit new LLM call
         if self._reasoning_step:
             with self._llm_lock:
-                no_pending = self._pending_llm_future is None
-            if no_pending:
-                future = self.reasoning_module(self._current_task, observation=self.state_to_json(state), previous_action=self.last_action, world_state=to_toon(self.MEMORY))
-                
-                with self._llm_lock:
-                    self._pending_llm_future = future
-                self._reasoning_step = False 
-
-        # --- Waiting for LLM response ---
+                if self._pending_llm_action is None and self.PLAN:
+                    planner_ctx = ""
+                    if self._planner_responses:
+                        planner_ctx = "\n".join(
+                            f"- {r}" for r in self._planner_responses[-2:]
+                        )
+                    self._pending_llm_action = self.reasoning_module(
+                        self.PLAN,
+                        observation=self.OBS,
+                        previous_action=self.past_actions,
+                        planner_context=planner_ctx,
+                    )
+                    self._reasoning_step = False
         return Idle.__name__, {'duration_in_ticks': 1}
 
-    def _record_action_in_memory(self, action:str, description: str):
+    def _record_action_in_memory(self, action:str):
         """
             Record a completed high-level action for LLM context and logging.
         """
-        self.last_action = action
-        self.memory.update('action', {
+        self.past_actions.append(action)
+        if len(self.past_actions) > 5:
+            self.past_actions = self.past_actions[-5:]
+        self.short_term_memory.update('action', {
             'action': action
         })
         
@@ -328,29 +391,49 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         """
             Convert LLM action decision to MATRX action.
         """
+        self._pending_llm_action = None
+        # --- Ask Planner for guidance ---
+        if 'AskPlanner' in llm_response:
+            question = llm_response.strip()
+            if self._planner_channel is not None and question:
+                tick = 0
+                try:
+                    tick = self.state_for_navigation['World']['nr_ticks']
+                except (KeyError, TypeError):
+                    pass
+                context = {
+                    'position': list(self._last_filtered_state[self.agent_id]['location']),
+                    'memory_summary': self.short_term_memory.get_compact_str()[:300]
+                        if self.short_term_memory.storage else '',
+                }
+                self._planner_channel.submit_question(
+                    agent_id=self.agent_id,
+                    content=question,
+                    tick=tick,
+                    context=context,
+                )
+                self._logger.info(f"[{self.agent_id}] Asked planner: {question}")
+            self._reasoning_step = True
+            return Idle.__name__, {'duration_in_ticks': 1}
+        
         parsed_response = parse_json_response(llm_response)
-        print(f"[{self.agent_id}] Parsed LLM response: {parsed_response}")
         if parsed_response is not None:
-                print(f"[{self.agent_id}] LLM response received -> {parsed_response}")
+                print(f"[{self.agent_id}]| Action: {parsed_response}")
         else:
-            print(f"[{self.agent_id}] PARSE of LLM response FAILED")
+            print(f"[{self.agent_id}]| PARSE of LLM response FAILED")
             self._reasoning_step = True
             return Idle.__name__, {'duration_in_ticks': 1}
             
         action = parsed_response.get('action', 'Idle')
         params = parsed_response.get('params') or {}
         object_id = params.get('object_id')
-        reasoning = params.get('reasoning', '')[:100]
 
         # --- Single-step moves ---
         if action in ('MoveNorth', 'MoveEast', 'MoveSouth', 'MoveWest'):
-            self.action_completed = True
             return action, {}
 
-        self._record_action_in_memory(f"{action}({params}), {object_id}", reasoning)
+        self._record_action_in_memory(f"{action}({params}), {object_id}")
         
-        print(f"[{self.agent_id}] Executing LLM action -> {action} params={params}")
-
         # --- MoveTo navigation ---
         if action == 'MoveTo':
             coords = self._parse_coordinates(params)
@@ -364,14 +447,12 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
         # --- Carry actions ---
         if action == 'CarryObject' and object_id:
-            self.action_completed = True
             return CarryObject.__name__, {
                 'object_id': object_id,
                 'human_name': self._human_name
             }
 
         if action == 'CarryObjectTogether' and object_id:
-            self.action_completed = True
             return CarryObjectTogether.__name__, {
                 'object_id': object_id,
                 'human_name': self._human_name
@@ -379,16 +460,13 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
         # --- Drop actions ---
         if action == 'Drop':
-            self.action_completed = True
             return Drop.__name__, {'human_name': self._human_name}
 
         if action == 'DropObjectTogether':
-            self.action_completed = True
             return DropObjectTogether.__name__, {'human_name': self._human_name}
 
-        # --- Remove actions ---
+        # --- Remove actions (multi-tick: ArtificialBrain adds duration) ---
         if action == 'RemoveObject' and object_id:
-            self.action_completed = True
             return RemoveObject.__name__, {
                 'object_id': object_id,
                 'remove_range': 1
@@ -396,7 +474,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
         if action == 'RemoveObjectTogether' and object_id:
             from actions1.CustomActions import RemoveObjectTogether as ROT
-            self.action_completed = True
             return ROT.__name__, {
                 'object_id': object_id,
                 'remove_range': 1,
@@ -407,12 +484,12 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         if action in ('BroadcastObservation', 'SendMessage', 'SendAcceptHelpMessage'):
             tick = 0
             try:
-                tick = self.state_from_engine['World']['nr_ticks']
+                tick = self.state_for_navigation['World']['nr_ticks']
             except (KeyError, TypeError):
                 pass
 
             if action == 'BroadcastObservation':
-                obs_json = self.observation_to_json(self._last_filtered_state)
+                obs_json = self.process_observations(self._last_filtered_state)
                 self.communication_module.generate_message(
                     'broadcast', tick,
                     observation_json=to_toon(obs_json),
@@ -425,7 +502,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                     target_location=json.dumps(params.get('target_location', [0, 0])),
                     action_needed=params.get('action_needed', 'RemoveObjectTogether'),
                     object_id=params.get('object_id', ''),
-                    context=reasoning,
+                    context="",
                 )
             elif action == 'SendAcceptHelpMessage':
                 self.communication_module.generate_message(
@@ -437,7 +514,26 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 )
 
             self._reasoning_step = True    # re-query for physical action
-            self.action_completed = False   # no MATRX action performed
+            return Idle.__name__, {'duration_in_ticks': 1}
+
+        # --- Direct message to specific agent ---
+        if action == 'SendDirectMessage':
+            tick = 0
+            try:
+                tick = self.state_for_navigation['World']['nr_ticks']
+            except (KeyError, TypeError):
+                pass
+            target_agent = params.get('target_agent', '')
+            message_intent = params.get('message', '')
+            context = params.get('context', '')
+            if target_agent and message_intent and self.communication_module is not None:
+                self.communication_module.generate_direct_message(
+                    target_agent_id=target_agent,
+                    tick=tick,
+                    message_intent=message_intent,
+                    context=context,
+                )
+            self._reasoning_step = True
             return Idle.__name__, {'duration_in_ticks': 1}
 
         # --- Navigate to drop zone ---
@@ -449,6 +545,19 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             move_action = self._navigator.get_move_action(self._state_tracker)
             if move_action is not None:
                 return move_action, {}
+
+        # --- Task completion: request new task from planner ---
+        if action == 'TaskComplete':
+            print(f"[{self.agent_id}] Task completed, requesting new task")
+            if self._request_task_callback is not None:
+                self._retask_future = self._request_task_callback()
+                self._current_task = None
+                self.PLAN = ''
+            else:
+                # No callback — clear task and idle
+                self._current_task = None
+                self.PLAN = ''
+            return Idle.__name__, {'duration_in_ticks': 1}
 
         return Idle.__name__, {'duration_in_ticks': 1}
 
@@ -481,22 +590,9 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         return None
 
     ### COMMUNICATION
-    def _send_message(self, content: str, sender: str):
-        """Send message to teammates."""
-        msg = Message(content=content, from_id=sender)
+    def _send_message(self, content: str, sender: str, target_id: str = None):
+        """Send message to teammates. If target_id is set, send direct message."""
+        msg = Message(content=content, from_id=sender, to_id=target_id)
         if content not in [m.content for m in self.messages_to_send]:
             self.send_message(msg)
-
-    ### ENGINE INTEGRATION METHODS
-    def plan_task(self) -> str:
-        """
-        Generate next subtask using cognitive module.
-        Called by the Engine during the planning phase.
-        """
-        return self._current_task or "explore nearest area"
-    
-    def _is_task_completed(self, result: Any) -> bool:
-        """Return True when the LLM signals the current task is done.
-        """
-        return result.contains('TASK COMPLETED')
 

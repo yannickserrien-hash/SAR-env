@@ -1,38 +1,22 @@
-# Prompts for EnginePlanner LLM calls.
-# Template variables use Python str.format() syntax: {variable_name}
-# Literal JSON braces are escaped as {{ and }}.
-
-default_task_description: |
-  25x24 grid. 14 rooms. Drop zone: (23,8).
-  8 victims: 4 critical (+6, require 2 agents), 4 mild (+3, solo).
-  Obstacles: tree (solo), small_stone (solo), big_rock (2 agents).
-  Goal: maximize score, minimize time.
-
 generate_tasks_system: |
-  You are the planning coordinator for a search and rescue mission.
-  Your objective is to minimize mission time.
-  You have {num_agents} AI agents available. Create one specific sub-task for each agent based on:
-  The current state of the world and the agent capabilities.
-  Assign different areas or objectives to different agents to maximize coverage.
-  Always respond with valid JSON only.
-
   You are the central planner for a search & rescue mission.
   Goal: maximize score and minimize total time.
-  Assign EXACTLY one clear sub-task per agent. If multiple optimal assignments exist, minimize total travel distance.
+  Assign EXACTLY one clear sub-task per agent. You have {num_agents} AI agents available. Create one specific sub-task for each agent based on:
+  The current state of the world and the agent capabilities.
+  Assign different areas or objectives to different agents to maximize coverage.
   Rules:
-  - Use full world knowledge.
   - Avoid duplicate assignments unless collaboration required.
   - Prefer nearest suitable agent (Manhattan distance).
   - Do not assign completed objectives.
   - The tasks should include clear victim or obstacle ids, coordinates for locations in the description.
   - The target_id and the location should be exactly the one from the WORLD_STATE, otherwise the action will not work.
 
-  Output JSON only.
   No explanations.
+  The location field is separate. Never merge id and location.
 
 generate_tasks_user: |
-  MISSION:
-  {task_description}
+  JSON_SCHEMA:
+  {json_schema}
   WORLD_STATE:
   {world_state_summary}
   AGENTS:
@@ -41,15 +25,8 @@ generate_tasks_user: |
   PREVIOUS_PLAN:
   {previous_summary}
 
-  Assign one task per agent.
-  Task must include:
-  - task_type
-  - target_id
-  - location
-  - notes (if coordination needed)
-
-  Respond using this JSON schema:
-  {json_schema}
+  follow the JSON schema.
+  Think step-by-step.
 
 summarize_system: |
   Summarize this planning iteration in under 80 words. Focus on progress, remaining victims, and next priorities.
@@ -63,3 +40,26 @@ summarize_user: |
   {world_state_summary}
   SCORE:
   {score_info}
+
+# ---------------------------------------------------------------------------
+# Agent question answering (EnginePlanner ↔ Agent communication)
+# ---------------------------------------------------------------------------
+answer_question_system: |
+  You are the central planner for a search & rescue mission.
+  An agent is asking you a question about their task or the mission.
+  You have broad context: all task assignments, iteration history, and scores.
+  Answer concisely (under 60 words). Be specific and actionable.
+  If the agent should coordinate with another agent, say which one and why.
+  Do NOT assign new tasks — only answer the question asked.
+  Respond in plain text (not JSON).
+
+answer_question_user: |
+  AGENT: {agent_id}
+  QUESTION: {question}
+  AGENT CONTEXT: {agent_context}
+  CURRENT TASKS: {current_tasks}
+  LAST SUMMARY: {last_summary}
+  SCORE: {score_info}
+  ITERATION: {iteration}
+
+  Answer this agent's question based on your mission-wide knowledge.
