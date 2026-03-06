@@ -3,10 +3,12 @@ import itertools
 import warnings
 from collections import OrderedDict
 from typing import Callable, Union, Iterable
+from numpy import random
 import requests
 
 from numpy.random.mtrand import RandomState
 import numpy as np
+import random
 
 from matrx.agents.agent_brain import AgentBrain
 from matrx.agents.capabilities.capability import SenseCapability
@@ -122,6 +124,7 @@ class WorldBuilder:
         if not isinstance(random_seed, int) and random_seed > 0:
             raise ValueError(f"The given random_seed {random_seed} should be "
                              f"an Int and bigger or equal to 1.")
+        random_seed = random.randint(1, 1000000)  # --- IGNORE ---
 
         # Check if the simulation_goal is a SimulationGoal, an int or a list
         # or tuple of SimulationGoal

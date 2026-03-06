@@ -29,7 +29,7 @@ ENVOBJECT_VIS_FROM_CENTER = True
 ######################
 # GridWorld defaults #
 ######################
-GRIDWORLD_RANDOM_SEED = 1
+GRIDWORLD_RANDOM_SEED = 3
 GRIDWORLD_SIZE = [25, 25]
 GRIDWORLD_STEP_DURATION = 0.1
 GRIDWORLD_TIME_FOCUS = "step"
