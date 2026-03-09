@@ -13,6 +13,7 @@ that persists across all agents for the entire game.
 
 import logging
 from typing import Any, Dict, List, Optional
+import concurrent.futures
 
 logger = logging.getLogger('CommunicationModule')
 
@@ -37,7 +38,11 @@ class CommunicationModule:
         self._send_message = send_message_fn
         self._shared_message_log = shared_message_log
 
-        # Track which received messages have already been seen
+        # Outbound: list of pending futures (supports concurrent messages)
+        self._outbound_futures: List[concurrent.futures.Future] = []
+
+        # Inbound: raw message store (no LLM parsing)
+        self._stored_messages: List[dict] = []
         self._last_processed_msg_index: int = 0
 
     # ------------------------------------------------------------------

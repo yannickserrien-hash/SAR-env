@@ -84,6 +84,11 @@ class PlanningModule:
             memory: Compact memory string.
             feedback: Accumulated planner Q&A (empty on first call).
         """
+        # Guard: don't submit if a planning LLM call is already pending
+        if self._planning_future is not None and not self._planning_future.done():
+            logger.warning("plan() called while previous planning call is pending — skipping")
+            return
+
         task_str = task if isinstance(task, str) else json.dumps(task, default=str)
 
         # Store args for re-plan
@@ -139,7 +144,7 @@ class PlanningModule:
                 question = raw.strip()  # fallback: use entire response
             self._question = question
             self._needs_clarification = True
-            logger.info(f"PlanningModule needs clarification: {question}")
+            print(f"PlanningModule needs clarification: {question}")
             return False
 
         # Valid plan (or fallback)
@@ -149,7 +154,7 @@ class PlanningModule:
             self.PLAN = '1. Explore nearest area'
         self._plan_ready = True
         self._needs_clarification = False
-        logger.info(f"PlanningModule: plan ready: {self.PLAN[:100]}")
+        logger.info(f"PlanningModule: plan ready: {self.PLAN}")
         return True
 
     def receive_answer(self, answer: str) -> None:

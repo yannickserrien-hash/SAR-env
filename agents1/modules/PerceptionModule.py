@@ -144,11 +144,11 @@ class PerceptionModule:
                 )
                 if existing is None:
                     self.WORLD_STATE_FILTERED['doors'].append({
-                        'id': area_id,
-                        'door': pos,
+                        'area': area_id,
+                        'location': pos,
                     })
                 else:
-                    existing['door'] = pos
+                    existing['location'] = pos
 
     def observation_to_dict(self, state) -> dict:
         """Convert a filtered state to a dict.
