@@ -48,7 +48,8 @@ class EnginePlanner:
         llm_model: str = 'llama3:8b',
         ticks_per_iteration: int = 100,
         include_human: bool = True,
-        api_url: str = None
+        api_url: str = None,
+        manual_plans_file: str = None,
     ):
         """
         Initialize EnginePlanner.
@@ -81,6 +82,15 @@ class EnginePlanner:
         self._prefetch_future: Optional[concurrent.futures.Future] = None
         # Cached agent list so prefetch submissions don't need a caller-supplied list.
         self._agents_cache: list = []
+
+        # Manual plans override (optional — replaces LLM task/plan generation)
+        self._manual_data: Optional[dict] = None
+        self._manual_iteration: int = 0
+        if manual_plans_file:
+            import yaml
+            with open(manual_plans_file, 'r') as _mf:
+                self._manual_data = yaml.safe_load(_mf)
+            self.logger.info(f"[Planner] Loaded manual plans from {manual_plans_file}")
 
         # Agent ↔ Planner communication channel
         self._planner_channel: Optional[PlannerChannel] = None
@@ -143,7 +153,7 @@ class EnginePlanner:
         user_prompt = PROMPTS['answer_question_user'].format(
             agent_id=question.agent_id,
             question=question.content,
-            world_state=json.dumps(self.world_state),
+            world_state=to_toon(self.world_state),
             current_tasks=json.dumps(current_tasks, default=str),
         )
 
@@ -152,7 +162,7 @@ class EnginePlanner:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             api_url=self._api_url,
-            max_tokens=500,
+            max_tokens=2000,
             temperature=0.2,
         )
         return response or "Unable to answer at this time."
@@ -199,6 +209,43 @@ class EnginePlanner:
         self._pending_answers = still_pending
 
     # ------------------------------------------------------------------
+    # Manual task/plan override
+    # ------------------------------------------------------------------
+
+    def _build_manual_tasks(self, agent_ids: list) -> Dict[str, Any]:
+        """Build task assignments (and optional plans) from the manual plans file."""
+        tasks: Dict[str, str] = {}
+        plans: Dict[str, str] = {}
+
+        # Per-iteration section: maps agent_id → {task, plan?}
+        iterations = self._manual_data.get('iterations', [])
+        if iterations:
+            idx = min(self._manual_iteration, len(iterations) - 1)
+            entry = iterations[idx]
+            self._manual_iteration += 1
+            for aid in agent_ids:
+                if aid in entry:
+                    agent_entry = entry[aid]
+                    tasks[aid] = agent_entry.get('task', 'explore nearest area')
+                    if 'plan' in agent_entry:
+                        plans[aid] = agent_entry['plan']
+
+        # agent_plans section: fallback plans keyed by agent_id
+        for aid in agent_ids:
+            if aid not in plans:
+                agent_plan = self._manual_data.get('agent_plans', {}).get(aid)
+                if agent_plan:
+                    plans[aid] = agent_plan
+            if aid not in tasks:
+                tasks[aid] = 'explore nearest area'
+
+        result: Dict[str, Any] = {'tasks': tasks}
+        if plans:
+            result['plans'] = plans
+        self.logger.info(f"[Planner] Manual tasks: {tasks}")
+        return result
+
+    # ------------------------------------------------------------------
     # Task generation
     # ------------------------------------------------------------------
 
@@ -216,11 +263,15 @@ class EnginePlanner:
         # Build per-agent ID list for the prompt
         agent_ids = [getattr(a, 'agent_id', f'rescuebot{i}') for i, a in enumerate(agents)]
 
+        # Use manual plans file if configured (bypasses LLM entirely)
+        if self._manual_data is not None:
+            return self._build_manual_tasks(agent_ids)
+
         # Build a formatted agent listing for the prompt
         agent_lines = []
         for aid in agent_ids:
             agent_lines.append(
-                f"  - {aid} (LLM-based)"
+                f"  - {aid}"
             )
         agent_ids_formatted = '\n'.join(agent_lines)
         agent_tasks_schema = ', '.join(f'"{aid}": "task for {aid}"' for aid in agent_ids)
@@ -235,7 +286,7 @@ class EnginePlanner:
 
         human_line = ""
         if self.include_human:
-            human_line = "- Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them."
+            human_line = "- Human"
 
         user_prompt = PROMPTS['generate_tasks_user'].format(
             world_state_summary=to_toon(self.world_state),
@@ -245,7 +296,7 @@ class EnginePlanner:
             human_line=human_line,
             previous_summary=(
                 self._last_summary if self._last_summary
-                else "This is the first iteration."
+                else "First iteration."
             ),
         )
         
@@ -275,8 +326,7 @@ class EnginePlanner:
         # Fallback if LLM fails
         self.logger.warning("LLM task generation failed, using fallback")
         fallback = {
-            'agent_tasks': {aid: 'explore area 1 and find victims' for aid in agent_ids},
-            'rescuebot_task': 'explore area 1 and find victims',
+            'tasks': {aid: 'explore area 1 and find victims' for aid in agent_ids},
         }
         if self.include_human:
             fallback['human_task'] = 'Please explore areas and rescue victims'
@@ -349,7 +399,7 @@ class EnginePlanner:
             self._prefetch_future = None
             try:
                 result = prefetch.result()
-                if result and ('agent_tasks' in result or 'rescuebot_task' in result):
+                if result and ('tasks' in result):
                     self.logger.info(
                         f"[Planner] Used prefetched tasks: {result.get('reasoning', '')}"
                     )
@@ -367,7 +417,7 @@ class EnginePlanner:
 
         # No prefetch available: submit fresh task generation
         return self._executor.submit(
-            self._generate_tasks_sync, to_toon(self.world_state), agents
+            self._generate_tasks_sync, agents
         )
 
     def request_new_task(self, world_state_summary: str,
@@ -386,7 +436,7 @@ class EnginePlanner:
             self._agents_cache = agents
         self.logger.info("[Planner] Mid-iteration re-task requested by agent.")
         return self._executor.submit(
-            self._generate_tasks_sync, world_state_summary, agents
+            self._generate_tasks_sync, agents
         )
 
     def submit_summarize(self, iteration_data: IterationData,

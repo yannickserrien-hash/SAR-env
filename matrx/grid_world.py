@@ -384,6 +384,14 @@ class GridWorld:
                             task = agent_tasks.get(aid, "Explore Area 1")
                             agent.set_current_task(task)
 
+                    # Dispatch manual plans if provided (must come after set_current_task)
+                    agent_plans = task_assignments.get('plans', {})
+                    for agent in agents:
+                        aid = getattr(agent, 'agent_id', None)
+                        if aid in agent_plans and hasattr(agent, 'set_manual_plan'):
+                            agent.set_manual_plan(agent_plans[aid])
+                            print(f"[GridWorld] Sent manual plan to {aid}:\n{agent_plans[aid]}")
+
                     # Inject mid-iteration re-task callback so agents can request a new
                     # task when they finish early, without waiting for the iteration to end.
                     # The callback captures the current planner + agent list and serializes

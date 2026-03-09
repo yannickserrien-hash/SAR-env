@@ -2,30 +2,42 @@
 
 # ── Per-tick action decision (ReasoningModule / reason_system) ─────────────────
 reasoning:
-  # Example — uncomment and edit:
   - user: |
       TASK: Navigate to room entrance at [5, 3]
+      WORLD_STATE: {"victims":[],"obstacles":[{"id":"stone_1","type":"stone","location":[4,3]}],"doors":[{"area":"area_1","location":[5,3]}],"teammate_positions":{}}
       POS: [3, 3]  CARRYING: nothing
-      NEARBY: {"stone_1": {"type": "stone", "location": [4, 3]}}
-      LAST_ACTION: MoveTo [4, 3]
+      NEARBY: {"stone:stone_1":["(4, 3)"]}
+      LAST_ACTIONS: 1. MoveTo([4, 3])
     assistant: |
       {"action": "RemoveObject", "params": {"object_id": "stone_1"}}
-  
+
   - user: |
       TASK: Remove obstacle at [9, 2]
+      WORLD_STATE: {"victims":[],"obstacles":[{"id":"rock_1","type":"big_rock","location":[9,2]}],"doors":[{"area":"area_2","location":[9,4]}],"teammate_positions":{"rescuebot1":[20,11]}}
       POS: [8, 6]  CARRYING: nothing
-      NEARBY: None
-      LAST_ACTION: MoveTo [8, 6]
+      NEARBY: {}
+      LAST_ACTIONS: 1. MoveTo([8, 6])
     assistant: |
       {"action": "MoveTo", "params": {"x": 9, "y": 2}}
-    
+
   - user: |
       TASK: Rescue critical victim victim_3 at [8, 6]
+      WORLD_STATE: {"victims":[{"id":"victim_3","type":"critical","location":[8,6]}],"obstacles":[],"doors":[{"area":"area_6","location":[9,7]}],"teammate_positions":{"humanagent":[8,7]}}
       POS: [8, 6]  CARRYING: nothing
-      NEARBY: {"victim_3": {"type": "critical_victim", "location": [8, 6]}, "humanagent": {"location": [8, 7]}}
-      LAST_ACTION: MoveTo [8, 6]
+      NEARBY: {"critical_victim:victim_3":["(8, 6)"],"human":[8,7]}
+      LAST_ACTIONS: 1. MoveTo([8, 6])
+      ACTION FEEDBACK: none
     assistant: |
       {"action": "CarryObjectTogether", "params": {"object_id": "victim_3"}}
+
+  - user: |
+      TASK: Remove stone_3 blocking path to area_2
+      POS: [5, 4]  CARRYING: nothing
+      NEARBY: {"stone:stone_3":["(6, 4)"]}
+      LAST_ACTIONS: 1. RemoveObject({'object_id': 'stone_3'}), stone_3 [FAILED: RemoveObject failed: stone_3 still present]
+      ACTION FEEDBACK: RemoveObject failed: stone_3 still present
+    assistant: |
+      {"action": "MoveTo", "params": {"x": 6, "y": 4}, "completing_subtask": "Move adjacent to stone_3 before removing"}
 
 
 # ── Task planning (EnginePlanner / generate_tasks_system) ─────────────────────
@@ -42,8 +54,8 @@ generate_tasks:
       rescuebot1[2]: 21,11
       rescuebot0[2]: 22,11
       AGENTS:
-      - rescuebot0 (LLM-based)
-      - rescuebot1 (LLM-based)
+      - rescuebot0
+      - rescuebot1
       PREVIOUS_PLAN: None
   
       Assign one task per agent.

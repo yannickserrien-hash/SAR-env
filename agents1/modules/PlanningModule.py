@@ -19,7 +19,6 @@ from engine.llm_utils import query_llm_async
 
 logger = logging.getLogger('PlanningModule')
 
-MAX_CLARIFICATION_ROUNDS = 3
 
 
 class PlanningModule:
@@ -135,8 +134,7 @@ class PlanningModule:
             self._planning_future = None
 
         # Check if LLM wants to ask the planner for more info
-        if (raw and 'AskPlanner' in raw
-                and self._clarification_round < MAX_CLARIFICATION_ROUNDS):
+        if raw and 'AskPlanner' in raw:
             # Extract question text (everything after "AskPlanner")
             idx = raw.index('AskPlanner')
             question = raw[idx + len('AskPlanner'):].strip().strip(':').strip()

@@ -16,10 +16,12 @@ class ReasoningIO(ReasoningBase):
     """
 
     def __call__(self, task_description: str, observation, previous_action,
-                 feedback: str = ''):
+                 world_state=None, feedback: str = ''):
         system_prompt = self._prompts['reason_system'].strip().format()
         user_prompt = self._build_reasoning_prompt(
-            task_description, observation, previous_action)
+            task_description, observation, previous_action, world_state, feedback)
+        
+        print("User Prompt:\n", user_prompt)
 
         return query_llm_async(
             model=self.llm_model,
@@ -29,7 +31,8 @@ class ReasoningIO(ReasoningBase):
             few_shot_messages=load_few_shot('reasoning'),
         )
 
-    def _build_reasoning_prompt(self, task_description, observation, previous_action) -> str:
+    def _build_reasoning_prompt(self, task_description, observation, previous_action,
+                                world_state=None, feedback: str = '') -> str:
         import json as _json
 
         # --- Extract agent pos + carrying from observation dict ---
@@ -41,6 +44,12 @@ class ReasoningIO(ReasoningBase):
         # --- Nearby objects: everything except the 'agent' key ---
         nearby = {k: v for k, v in observation.items() if k != 'agent'} if isinstance(observation, dict) else {}
         nearby_json = _json.dumps(nearby, separators=(',', ':')) if nearby else '{}'
+
+        # --- World state: accumulated knowledge of the map ---
+        if world_state and isinstance(world_state, dict):
+            world_state_str = _json.dumps(world_state, separators=(',', ':'))
+        else:
+            world_state_str = '{}'
 
         if not previous_action:
             previous_action = 'None'
@@ -55,6 +64,7 @@ class ReasoningIO(ReasoningBase):
             carrying=carrying_str,
             nearby_json=nearby_json,
             prev_action=previous_action,
+            action_feedback=feedback if feedback else 'none',
         )
 
         return user_prompt

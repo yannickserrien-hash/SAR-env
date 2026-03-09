@@ -21,6 +21,10 @@ if __name__ == "__main__":
     ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
     planner_model = 'gemma3:12b'  # Larger model for the EnginePlanner (main brain)
 
+    # Set to a YAML file path to override LLM task/plan generation with manual inputs.
+    # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
+    manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
+
     # Scale LLM thread pool for the number of agents
     init_llm_pool(num_rescue_agents)
 
@@ -56,7 +60,8 @@ if __name__ == "__main__":
         llm_model=planner_model,
         ticks_per_iteration=ticks_per_iteration,
         include_human=include_human,
-        api_url=f"http://localhost:{ollama_base_port}"
+        api_url=f"http://localhost:{ollama_base_port}",
+        manual_plans_file=manual_plans_file,
     )
 
     # Run with MARBLE-style planning loop

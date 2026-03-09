@@ -140,7 +140,7 @@ class PerceptionModule:
             elif typ in ('door_open', 'door_closed'):
                 area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
                 existing = next(
-                    (d for d in self.WORLD_STATE_FILTERED['doors'] if d['id'] == area_id), None
+                    (d for d in self.WORLD_STATE_FILTERED['doors'] if d['area'] == area_id), None
                 )
                 if existing is None:
                     self.WORLD_STATE_FILTERED['doors'].append({

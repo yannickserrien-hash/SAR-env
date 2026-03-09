@@ -57,6 +57,6 @@ answer_question_user: |
   QUESTION: {question}
   CURRENT TASKS: {current_tasks}
   WORLD_STATE:
-  {world_state_summary}
+  {world_state}
   
   Answer this agent's question based on your knowledge.

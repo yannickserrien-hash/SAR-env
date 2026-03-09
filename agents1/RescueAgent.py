@@ -93,6 +93,13 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         }
         self.OBS = {}
         
+        # Action failure detection (state-comparison)
+        self._prev_tick_location = None
+        self._prev_tick_carrying_ids = []
+        self._last_action_target_id = None
+        self._last_action_feedback = ''
+        self._consecutive_failures = 0
+
         # Debug
         self._verbose = True
         self._logger = logging.getLogger('RescueAgent')
@@ -104,14 +111,12 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self.short_term_memory = ShortTermMemory(memory_limit=20, llm_model=self._llm_model, api_url=self._api_url)
         
         # Planning state
-        self._planning_in_progress = False
-        self._completed_action_count = 0  # counts completed actions for comm gating
         self.PLAN = ''  # current plan from PlanningModule
+        self._replan_feedback = ''  # feedback from Replan action for PlanningModule
 
         # Agent ↔ Planner communication
         self._planner_channel = None
         self._planner_responses: list = []  # recent planner response strings
-        self._planning_question_submitted = False  # prevents re-submitting same question
 
         # Mid-iteration re-tasking: callback injected by GridWorld, future for the LLM call
         self._request_task_callback = None   # callable() -> Future; set by run_with_planner
@@ -168,41 +173,40 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         )
 
     def set_current_task(self, task):
-        """
-            Set the current high-level task from the EnginePlanner.
-        """
-        # Normalise: EnginePlanner may pass a dict instead of a plain string
+        """Set the current high-level task from the EnginePlanner."""
         if not isinstance(task, str):
             task = json.dumps(task, default=str)
         self._current_task = task
 
-        # Record task assignment in memory (persists across tasks)
+        # Record in memory
         tick = 0
         if self.state_for_navigation is not None:
             try:
                 tick = self.state_for_navigation['World']['nr_ticks']
             except (KeyError, TypeError):
                 pass
-        self.short_term_memory.update('task', {
-            'task': task,
-            'tick': tick,
-        })
+        self.short_term_memory.update('task', {'task': task, 'tick': tick})
 
-        # Reset navigation and LLM state for new task (memory is NOT reset)
+        # Reset all state for new task (memory is NOT reset)
         self._nav_target = None
         self._reasoning_step = False
+        self._replan_feedback = ''
+        self.PLAN = ''
+        self._retask_future = None
         with self._llm_lock:
             self._pending_llm_action = None
             self._last_llm_result = None
-
-        # Reset planning state and trigger task decomposition
-        self._completed_action_count = 0
-        self._planning_in_progress = True
-        self.PLAN = ''
-        self._planning_question_submitted = False
-        self._retask_future = None
         if self.planning_module is not None:
             self.planning_module.reset()
+
+    def set_manual_plan(self, plan: str):
+        """Override PlanningModule by directly setting the plan text.
+        Must be called after set_current_task() (which resets self.PLAN).
+        """
+        if plan and plan.strip():
+            self.PLAN = plan.strip()
+            self._reasoning_step = True
+            print(f"[{self.agent_id}] Manual plan set: {self.PLAN[:80]}...")
 
     def filter_observations(self, state: State) -> State:
         """
@@ -237,17 +241,46 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         return filtered_state
 
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
-        # Configs
+        # 1. PERCEPTION — always runs
         self._state_tracker.update(self.state_for_navigation)
-
-        # Process observation
         self.WORLD_STATE_FILTERED = self.process_observations(filtered_state)
         self.OBS = self.observation_to_dict(filtered_state)
-
+        print(f"[{self.agent_id}] self.OBS: {self.OBS}")
+        print(f"[{self.agent_id}] self.WORLD_STATE_FILTERED: {self.WORLD_STATE_FILTERED}")
         self._last_filtered_state = filtered_state
 
-        # ===== Task completion re-tasking =====
-        # If a re-task future is pending, poll it
+        # 1b. ACTION FAILURE DETECTION — compare with previous tick's state
+        self._last_action_feedback = self._detect_action_failure(filtered_state)
+        if self._last_action_feedback:
+            self._consecutive_failures += 1
+            print(f"[{self.agent_id}] FAILED: {self._last_action_feedback}")
+            # Annotate the most recent past action with the failure
+            if self.past_actions:
+                last = self.past_actions[-1]
+                if '[FAILED' not in last:
+                    self.past_actions[-1] = f"{last} [FAILED: {self._last_action_feedback}]"
+            # Auto-replan after 3 consecutive failures
+            if self._consecutive_failures >= 3 and self.PLAN:
+                print(f"[{self.agent_id}] {self._consecutive_failures} consecutive failures, replanning")
+                self._replan_feedback = f"Repeated failures: {self._last_action_feedback}"
+                self.planning_module.reset()
+                self.PLAN = ''
+                self._reasoning_step = False
+                self._consecutive_failures = 0
+                return Idle.__name__, {'duration_in_ticks': 1}
+        else:
+            if self.previous_action is not None:
+                self._consecutive_failures = 0
+
+        # Save current state for next tick's failure detection
+        self._prev_tick_location = tuple(filtered_state[self.agent_id]['location'])
+        is_carrying_raw = filtered_state[self.agent_id].get('is_carrying', [])
+        self._prev_tick_carrying_ids = sorted(
+            o.get('obj_id', str(o)) if isinstance(o, dict) else str(o)
+            for o in is_carrying_raw
+        )
+
+        # 2. RE-TASK polling
         if self._retask_future is not None:
             if self._retask_future.done():
                 try:
@@ -263,34 +296,50 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                     self._logger.warning(f"[{self.agent_id}] Re-task failed: {e}")
                     self._retask_future = None
             else:
-                # Still waiting for new task from planner
                 return Idle.__name__, {'duration_in_ticks': 1}
 
-        # ===== No task =====
+        # 3. No task → Idle
         if not self._current_task:
             return Idle.__name__, {'duration_in_ticks': 1}
 
-        # ===== Planning phase =====
+        # 4. NAVIGATION — if mid-route, keep moving
+        if self._nav_target is not None:
+            move_action = self._navigator.get_move_action(self._state_tracker)
+            if move_action is not None:
+                return move_action, {}
+            else:
+                self._nav_target = None
+                self._reasoning_step = True
 
-        # 1. Trigger initial plan decomposition (once per task)
-        if self._planning_in_progress and self.PLAN == '':
+        # 5. PLANNING — if no plan, submit/poll planning
+        if self.PLAN == '':
+            return self._handle_planning()
+
+        # 6. REASONING — poll/submit LLM action
+        return self._handle_reasoning()
+
+    def _handle_planning(self) -> Tuple[str, Dict]:
+        """Submit or poll the PlanningModule. Returns Idle while planning."""
+        # Submit plan request if nothing in flight
+        if not self.planning_module.is_planning and not self.planning_module.plan_ready:
             self.planning_module.plan(
                 task=self._current_task,
                 world_state=to_toon(self.WORLD_STATE_FILTERED),
                 memory=self.short_term_memory.get_compact_str()[:400]
                     if self.short_term_memory.storage else '',
+                feedback=self._replan_feedback,
             )
-            self._planning_in_progress = False
+            self._replan_feedback = ''
 
-        # 2. Wait for plan if not ready
-        if not self.planning_module.plan_ready and self.PLAN == '':
+        # Poll for plan readiness
+        if not self.planning_module.plan_ready:
             self.planning_module.is_plan_ready()
 
-            # Handle "AskPlanner" — needs clarification from EnginePlanner
-            if self.planning_module.needs_clarification:
-                # Submit question to planner channel (once per question)
-                if self._planner_channel is not None and not self._planning_question_submitted:
-                    question = self.planning_module.get_question()
+            # Handle AskPlanner — needs clarification from EnginePlanner
+            if self.planning_module.needs_clarification and self._planner_channel is not None:
+                # Submit question only once (needs_clarification stays True until answered)
+                question = self.planning_module.get_question()
+                if question and question != getattr(self, '_last_submitted_question', ''):
                     tick = 0
                     try:
                         tick = self.state_for_navigation['World']['nr_ticks']
@@ -302,45 +351,32 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                         tick=tick,
                         context={'task': self._current_task},
                     )
-                    self._planning_question_submitted = True
+                    self._last_submitted_question = question
                     print(f"[{self.agent_id}] Asked planner: {question}")
 
-                # Poll for planner's response
-                if self._planner_channel is not None:
-                    responses = self._planner_channel.poll_responses(self.agent_id)
-                    if responses:
-                        answer = responses[0].content
-                        self.planning_module.receive_answer(answer)
-                        self._planning_question_submitted = False
-                        print(f"[{self.agent_id}] Planner answered: {answer}")
+            # Poll for planner's response
+            if self._planner_channel is not None:
+                responses = self._planner_channel.poll_responses(self.agent_id)
+                if responses:
+                    answer = responses[0].content
+                    self.planning_module.receive_answer(answer)
+                    print(f"[{self.agent_id}] Planner answered: {answer}")
 
-            # Idle while waiting for plan/clarification
             return Idle.__name__, {'duration_in_ticks': 1}
 
-        # 3. Extract plan once ready
-        if self.PLAN == '' and self.planning_module.plan_ready:
-            self.PLAN = self.planning_module.get_plan
-            self._reasoning_step = True
-            print(f"[{self.agent_id}] Plan ready: {self.PLAN}")
+        # Plan is ready — extract and move to reasoning
+        self.PLAN = self.planning_module.get_plan
+        self._reasoning_step = True
+        print(f"[{self.agent_id}] Plan ready: {self.PLAN}")
+        return Idle.__name__, {'duration_in_ticks': 1}
 
-        # ===== Execution phase =====
-
-        # Let Agent finish MoveTo() action
-        if self._nav_target is not None:
-            move_action = self._navigator.get_move_action(self._state_tracker)
-
-            if move_action is not None:  # Still moving to target
-                print(f"[{self.agent_id}] Navigating to {self._nav_target} | "
-                      f"action={move_action}")
-                return move_action, {}
-            else:  # Stop navigation (arrived or path blocked)
-                self._nav_target = None
-                self._reasoning_step = True
-
+    def _handle_reasoning(self) -> Tuple[str, Dict]:
+        """Poll/submit the ReasoningModule. Returns action or Idle."""
+        print(f"[{self.agent_id}] Reasoning step")
         if self.communication_module is not None:
             self.communication_module.poll_inbound(self.received_messages)
 
-        # Get LLM action if reasoning step is done
+        # Poll pending LLM future
         with self._llm_lock:
             if self._pending_llm_action is not None and self._pending_llm_action.done():
                 try:
@@ -350,23 +386,69 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 finally:
                     self._pending_llm_action = None
 
+        # Execute result if available
         if self._last_llm_result is not None:
-            action = self._last_llm_result
+            result = self._last_llm_result
             self._last_llm_result = None
-            return self.text_to_action(action)
+            return self.text_to_action(result)
 
         # Submit new LLM call
         if self._reasoning_step:
+            print(f"[{self.agent_id}] Submitting reasoning to LLM.")
             with self._llm_lock:
-                if self._pending_llm_action is None and self.PLAN:
-
+                if self._pending_llm_action is None:
                     self._pending_llm_action = self.reasoning_module(
                         self.PLAN,
                         observation=self.OBS,
                         previous_action=self.past_actions,
+                        world_state=self.WORLD_STATE_FILTERED,
+                        feedback=self._last_action_feedback,
                     )
-                    self._reasoning_step = False
+                    self._reasoning_step = True
+        print(f"[{self.agent_id}] No LLM result yet, idling")
         return Idle.__name__, {'duration_in_ticks': 1}
+
+    def _detect_action_failure(self, filtered_state) -> str:
+        """Compare current state with saved pre-action state to detect failures.
+
+        Returns a short feedback string describing the failure, or '' if no
+        failure detected.
+        """
+        prev_action = self.previous_action
+        if prev_action is None or self._prev_tick_location is None:
+            return ''
+
+        current_loc = tuple(filtered_state[self.agent_id]['location'])
+        is_carrying_raw = filtered_state[self.agent_id].get('is_carrying', [])
+        current_carrying_ids = sorted(
+            o.get('obj_id', str(o)) if isinstance(o, dict) else str(o)
+            for o in is_carrying_raw
+        )
+
+        # --- Move failed: location unchanged ---
+        if prev_action in ('MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest'):
+            if current_loc == self._prev_tick_location:
+                return f"{prev_action} failed: location unchanged at {list(current_loc)}, path blocked"
+
+        # --- Carry failed: carrying list unchanged ---
+        if prev_action in ('CarryObject', 'CarryObjectTogether'):
+            if current_carrying_ids == self._prev_tick_carrying_ids:
+                return f"{prev_action} failed: not carrying anything new"
+
+        # --- Drop failed: still carrying ---
+        if prev_action in ('Drop', 'DropObjectTogether'):
+            if current_carrying_ids:
+                return f"{prev_action} failed: still carrying {current_carrying_ids}"
+
+        # --- Remove failed: target obstacle still in observation ---
+        if prev_action in ('RemoveObject', 'RemoveObjectTogether'):
+            target = self._last_action_target_id
+            if target:
+                for key in self.OBS:
+                    if target in str(key):
+                        return f"{prev_action} failed: {target} still present"
+
+        return ''
 
     def _record_action_in_memory(self, action:str):
         """
@@ -419,6 +501,13 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         action = parsed_response.get('action', 'Idle')
         params = parsed_response.get('params') or {}
         object_id = params.get('object_id')
+
+        # Track target object for failure detection on next tick
+        if action in ('CarryObject', 'CarryObjectTogether',
+                       'RemoveObject', 'RemoveObjectTogether'):
+            self._last_action_target_id = object_id
+        else:
+            self._last_action_target_id = None
 
         # --- Single-step moves ---
         if action in ('MoveNorth', 'MoveEast', 'MoveSouth', 'MoveWest'):
@@ -535,6 +624,16 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             move_action = self._navigator.get_move_action(self._state_tracker)
             if move_action is not None:
                 return move_action, {}
+
+        # --- Replan: reasoning can't make progress with current plan ---
+        if action == 'Replan':
+            reason = params.get('reason', '')
+            print(f"[{self.agent_id}] Replanning: {reason}")
+            self._replan_feedback = reason
+            self.planning_module.reset()
+            self.PLAN = ''
+            self._reasoning_step = False
+            return Idle.__name__, {'duration_in_ticks': 1}
 
         # --- Task completion: request new task from planner ---
         if action == 'TaskComplete':

@@ -1,23 +1,9 @@
-# Prompts for RescueAgent LLM calls.
-# Template variables use Python str.format() syntax: {variable_name}
-# Literal JSON braces are escaped as {{ and }}.
-
 # ---------------------------------------------------------------------------
 # Agent profile / system message (used as self.system_message on the agent)
 # ---------------------------------------------------------------------------
 agent_profile_system: |
   You are "{agent_id}": "{profile}"
   You are a rescue agent operating in a partially observable grid world.
-
-
-# ---------------------------------------------------------------------------
-# Reasoning: user prompt template for the main per-tick decision call
-# ---------------------------------------------------------------------------
-reasoning_user: |
-  TASK: {current_task}
-  POS: {agent_pos}  CARRYING: {carrying}
-  NEARBY: {nearby_json}
-  LAST_ACTIONS:{prev_action}
 
 # ---------------------------------------------------------------------------
 # Planning: decompose a high-level task into ordered sub-tasks
@@ -30,8 +16,8 @@ planning_decompose_system: |
   TOo do this you MUST return the str "AskPlanner" and your question. Do NOT return a plan if you are asking for more information.
 
   For a plan, ONLY the following format and DO NOT ADD EXTRA TEXT:
-    1. Sub-task 1: description
-    2. Sub-task 2: description
+    1. Sub-task 1
+    2. Sub-task 2
 
   PROTOCOL: Pick an area to search; Move to area's door location; Remove obstacle if blocking path or door; 
   Search room/area for victims; Carry victim from the area; Deliver to drop zone; Drop victim at drop zone; Repeat.
@@ -51,24 +37,34 @@ reason_system: |
   You are a LOW-LEVEL EXECUTOR in a search and rescue simulation.
   Execute ONLY the CURRENT SUBTASK. Do NOT change goals.
 
-  Reply with ONE JSON object only: {{"action":str,"params":dict}}
+  Reply with ONE JSON object only: {{"action":str,"params":dict, "completing_subtask":str}}
+  Always add which subtask you are completing in the "completing_subtask" field.
 
   ACTIONS:
   MoveTo(x,y) NavigateToDropZone() MoveNorth() MoveSouth() MoveEast() MoveWest()
   RemoveObject(object_id) RemoveObjectTogether(object_id)
   CarryObject(object_id) CarryObjectTogether(object_id)
   Drop(object_id) DropObjectTogether(object_id)
-  SendMessage(target_location,action_needed,object_id,context)
-  BroadcastObservation() SendAcceptHelpMessage(help_message)
-  AskPlanner(question)
-  SendDirectMessage(target_agent, message, context)
 
   RULES:
-  - Must be adjacent (Chebyshev 1) to interact with targets.
+  - If injured victims are in Current Observation, do CarryObject.
+  - Healthy victims do not need to be rescued.
+  - Must be adjacent to interact with targets.
   - Obstacles block movement; move adjacent first, then RemoveObject.
   - Use only object_ids from NEARBY.
-  - DO NOT REPEAT the same action as in the past if you are in the same location as before
+  - DO NOT REPEAT the same action as in the past if you are in the same location as before.
   - No extra text outside JSON.
-  - If there is an obstacle in NEARBY blocking your path, return RemoveObject or SendMessage to ask for help.
+  - If the current plan does not match what you observe, or you cannot make progress, use Replan to request a new plan.
+  - Use TaskComplete when you have finished all steps of the current task.
+  - If ACTION FEEDBACK reports a failure, do NOT repeat the failed action. Try a different approach or Replan.
 
 
+# ---------------------------------------------------------------------------
+# Reasoning: user prompt template for the main per-tick decision call
+# ---------------------------------------------------------------------------
+reasoning_user: |
+  TASK: {current_task}
+  YOUR POSITION: {agent_pos}  CARRYING: {carrying}
+  Current Observation: {nearby_json}
+  LAST ACTIONS:{prev_action}
+  ACTION FEEDBACK: {action_feedback}

@@ -121,9 +121,6 @@ def query_llm(
     prompt_parts.append(":\n")
 
     full_prompt = "\n".join(prompt_parts)
-    print(model)
-    print(full_prompt)
-
     try:
         response = requests.post(
             f"{base_url}/api/generate",
