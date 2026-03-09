@@ -98,27 +98,6 @@ planning_evaluate:
   #     {"success": true, "reason": "victim_2 was carried and dropped at drop zone (23,8)"}
 
 
-# ── Outbound message generation (CommunicationModule / comm_generate_system) ──
-communication:
-  - user: |
-      Type: Help Request (tick 42)
-      Location needing help: [8, 6]
-      Action required: CarryObjectTogether
-      Object: victim_3
-      Context: critical victim, need both agents
-    assistant: |
-      {"message": "[HelpRequest] Need cooperative carry at [8,6] for critical victim_3. Please come immediately."}
-
-
-# ── Inbound message parsing (CommunicationModule / comm_inbound_system) ───────
-comm_inbound:
-  - user: |
-      Parse these messages and extract useful information:
-      [t=42] rescuebot0: [HelpRequest] Need cooperative carry at [8,6] for critical victim_3.
-    assistant: |
-      {"entries": [{"type": "intel_help_requested", "detail": "cooperative carry needed for victim_3", "location": [8, 6]}]}
-
-
 # ── Planner answering agent questions (EnginePlanner / answer_question_*) ─────
 planner_answer:
   - user: |
@@ -131,16 +110,6 @@ planner_answer:
       ITERATION: 3
     assistant: |
       The rock at Area 3 needs cooperative removal. rescuebot1 is busy rescuing in Area 1 — skip Area 3 for now and explore Area 4 at [21, 4] instead. We will coordinate rock removal next iteration.
-
-# ── Direct message generation (CommunicationModule / comm_direct_*) ──────────
-direct_message:
-  - user: |
-      Type: Direct Message (tick 85)
-      Target: rescuebot1
-      Intent: I found a critical victim in area 5 and need help carrying it
-      Context: victim_4 at [4, 8], critical severity
-    assistant: |
-      {"message": "[t=85] I found critical victim_4 at [4,8] in area 5. Need your help for cooperative carry. Can you come over?"}
 
 # ── Memory extraction (RescueAgent / memory_extract_*) ───────────────────────
 memory_extract:

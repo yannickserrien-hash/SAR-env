@@ -84,6 +84,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
 
     agents = []
+    shared_message_log = []  # shared across all agents for the entire game
     for team in range(nr_teams):
         team_name = f"Team {team}"
         # Add the artificial agents based on condition and agent_type
@@ -92,7 +93,8 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
             if agent_type == 'llm':
                 brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
                                     llm_model='llama3:8b', include_human=include_human,
-                                    ollama_port=ollama_base_port + agent_nr + 1)
+                                    ollama_port=ollama_base_port + agent_nr + 1,
+                                    shared_message_log=shared_message_log)
                 agents.append(brain)
                 print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
 

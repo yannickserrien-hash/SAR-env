@@ -17,6 +17,8 @@ import os
 import concurrent.futures
 from typing import List, Dict, Any, Optional
 
+from engine.toon_utils import to_toon
+
 import yaml
 
 from engine.iteration_data import IterationData
@@ -68,6 +70,7 @@ class EnginePlanner:
         self.iteration_history: List[IterationData] = []
         self.logger = logging.getLogger('EnginePlanner')
         self._last_summary = ""
+        self.world_state = {}  # latest world state received from channel
 
         # Background thread pool for async LLM calls (4 workers: planner + summarizer + prefetch + Q&A)
         self._executor = concurrent.futures.ThreadPoolExecutor(
@@ -105,6 +108,10 @@ class EnginePlanner:
     def set_channel(self, channel: PlannerChannel):
         """Set the communication channel (called once during setup)."""
         self._planner_channel = channel
+    
+    def set_world_state(self, world_state: Dict[str, Any]):
+        """Receive the current world state (called every tick from run_with_planner)."""
+        self.world_state = world_state
 
     def _read_score_info(self) -> str:
         """Read current score data from score.json."""
@@ -125,7 +132,6 @@ class EnginePlanner:
 
         Runs synchronously in a background thread.
         """
-        score_info = self._read_score_info()
 
         current_tasks = {}
         if self.iteration_history:
@@ -137,11 +143,8 @@ class EnginePlanner:
         user_prompt = PROMPTS['answer_question_user'].format(
             agent_id=question.agent_id,
             question=question.content,
-            agent_context=json.dumps(question.context, default=str),
+            world_state=json.dumps(self.world_state),
             current_tasks=json.dumps(current_tasks, default=str),
-            last_summary=self._last_summary or "No previous summary.",
-            score_info=score_info,
-            iteration=len(self.iteration_history),
         )
 
         response = query_llm(
@@ -199,7 +202,7 @@ class EnginePlanner:
     # Task generation
     # ------------------------------------------------------------------
 
-    def _generate_tasks_sync(self, world_state_summary: str, agents: list) -> Dict[str, str]:
+    def _generate_tasks_sync(self, agents: list) -> Dict[str, str]:
         """
         Synchronous core of task generation — called inside a background thread.
 
@@ -235,7 +238,7 @@ class EnginePlanner:
             human_line = "- Human (keyboard-controlled): Acts independently. You can suggest a task but cannot control them."
 
         user_prompt = PROMPTS['generate_tasks_user'].format(
-            world_state_summary=world_state_summary,
+            world_state_summary=to_toon(self.world_state),
             num_agents=num_agents,
             json_schema = json_schema,
             agent_ids_formatted=agent_ids_formatted,
@@ -329,7 +332,7 @@ class EnginePlanner:
     # Non-blocking API (returns Futures, never blocks the caller)
     # ------------------------------------------------------------------
 
-    def submit_generate_tasks(self, world_state_summary: str,
+    def submit_generate_tasks(self,
                               agents: list) -> concurrent.futures.Future:
         """
         Submit task generation to a background thread. Returns a Future immediately.
@@ -364,7 +367,7 @@ class EnginePlanner:
 
         # No prefetch available: submit fresh task generation
         return self._executor.submit(
-            self._generate_tasks_sync, world_state_summary, agents
+            self._generate_tasks_sync, to_toon(self.world_state), agents
         )
 
     def request_new_task(self, world_state_summary: str,

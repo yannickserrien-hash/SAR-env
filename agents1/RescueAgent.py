@@ -52,7 +52,8 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         folder: str,
         llm_model: str = 'llama3:8b',
         include_human: bool = True,
-        ollama_port: int = 11434
+        ollama_port: int = 11434,
+        shared_message_log: list = None,
     ):
         super().__init__(slowdown, condition, name, folder)
 
@@ -116,6 +117,9 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self._request_task_callback = None   # callable() -> Future; set by run_with_planner
         self._retask_future: Optional[concurrent.futures.Future] = None
 
+        # Shared message log across all agents (passed from WorldBuilder)
+        self._shared_message_log = shared_message_log if shared_message_log is not None else []
+
     def initialize(self):
         """Initialize all components when world starts."""
         
@@ -136,11 +140,9 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         )
 
         self.communication_module = CommunicationModule(
-            llm_model=self._llm_model,
-            prompts=self._prompts,
             agent_id=self.agent_id,
             send_message_fn=self._send_message,
-            api_url=self._api_url,
+            shared_message_log=self._shared_message_log,
         )
 
         self.planning_module = PlanningModule(
@@ -337,11 +339,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 self._reasoning_step = True
 
         if self.communication_module is not None:
-            self.communication_module.poll_outbound()
-            self.communication_module.poll_inbound(
-                self.received_messages,
-                action_count=self._completed_action_count,
-            )
+            self.communication_module.poll_inbound(self.received_messages)
 
         # Get LLM action if reasoning step is done
         with self._llm_lock:
@@ -490,22 +488,20 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
             if action == 'BroadcastObservation':
                 obs_json = self.process_observations(self._last_filtered_state)
-                self.communication_module.generate_message(
+                self.communication_module.send_templated_message(
                     'broadcast', tick,
                     observation_json=to_toon(obs_json),
-                    world_state_str="",
                     current_task=self._current_task or 'none',
                 )
             elif action == 'SendMessage':
-                self.communication_module.generate_message(
+                self.communication_module.send_templated_message(
                     'help_request', tick,
                     target_location=json.dumps(params.get('target_location', [0, 0])),
                     action_needed=params.get('action_needed', 'RemoveObjectTogether'),
                     object_id=params.get('object_id', ''),
-                    context="",
                 )
             elif action == 'SendAcceptHelpMessage':
-                self.communication_module.generate_message(
+                self.communication_module.send_templated_message(
                     'accept_help', tick,
                     help_message=params.get('help_message', ''),
                     agent_location=json.dumps(list(
@@ -527,7 +523,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             message_intent = params.get('message', '')
             context = params.get('context', '')
             if target_agent and message_intent and self.communication_module is not None:
-                self.communication_module.generate_direct_message(
+                self.communication_module.send_direct_message(
                     target_agent_id=target_agent,
                     tick=tick,
                     message_intent=message_intent,

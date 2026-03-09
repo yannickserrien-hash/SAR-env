@@ -361,8 +361,9 @@ class GridWorld:
                 # Submit planning to background thread (returns Future immediately)
                 world_state = self.__get_complete_state()
                 map = self.process_map_to_dict(world_state)
+                planner.set_world_state(map)  # send current world state to planner for question answering
                 
-                planning_future = planner.submit_generate_tasks(to_toon(map), agents)
+                planning_future = planner.submit_generate_tasks(agents)
                 phase = PLANNING_IN_PROGRESS
 
             if phase == PLANNING_IN_PROGRESS and planning_future is not None: # assign tasks
