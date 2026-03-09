@@ -14,7 +14,7 @@ Multiple outbound messages can be in-flight simultaneously.
 import json
 import logging
 import concurrent.futures
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from engine.llm_utils import query_llm_async, parse_json_response, load_few_shot
 
@@ -22,8 +22,6 @@ logger = logging.getLogger('CommunicationModule')
 
 
 class CommunicationModule:
-
-    MAX_INBOUND_BATCH = 5
 
     def __init__(
         self,
@@ -42,18 +40,28 @@ class CommunicationModule:
         # Outbound: list of pending futures (supports concurrent messages)
         self._outbound_futures: List[concurrent.futures.Future] = []
 
-        # Inbound: single future for sequential batch processing
-        self._inbound_future: Optional[concurrent.futures.Future] = None
+        # Inbound: raw message store (no LLM parsing)
+        self._stored_messages: List[dict] = []
         self._last_processed_msg_index: int = 0
 
     # ------------------------------------------------------------------
     # Outbound: unified message generation
     # ------------------------------------------------------------------
 
+    def has_pending_llm(self) -> bool:
+        """True if any outbound LLM future is still in-flight."""
+        return any(
+            not (f[0] if isinstance(f, tuple) else f).done()
+            for f in self._outbound_futures
+        )
+
     def generate_message(self, msg_type: str, tick: int, **kwargs) -> None:
         """
             Submit an async LLM call to generate a message.
         """
+        if self.has_pending_llm():
+            logger.debug("Outbound LLM call pending — skipping new message generation")
+            return
         system_prompt = self._prompts.get('comm_generate_system', '').format()
         user_prompt_key = f'comm_{msg_type}_user'
         user_template = self._prompts.get(user_prompt_key, '')
@@ -76,6 +84,9 @@ class CommunicationModule:
     def generate_direct_message(self, target_agent_id: str, tick: int,
                                 message_intent: str, context: str = '') -> None:
         """Submit an async LLM call to generate a direct message to a specific agent."""
+        if self.has_pending_llm():
+            logger.debug("Outbound LLM call pending — skipping new direct message generation")
+            return
         system_prompt = self._prompts.get('comm_direct_system', '').format()
         user_template = self._prompts.get('comm_direct_user', '')
         try:
@@ -138,89 +149,25 @@ class CommunicationModule:
     # ------------------------------------------------------------------
 
     def poll_inbound(self, received_messages: list, action_count: int = 0) -> None:
-        """Process new inbound messages via async LLM parsing.
+        """Store new inbound messages directly (no LLM parsing).
 
-        Called every tick. Checks for new messages since last processing,
-        submits them to the LLM for extraction, and writes results to memory.
-        LLM parse submissions are gated to every 5 completed actions to reduce cost.
+        Called every tick. Appends any new messages to self._stored_messages.
 
         Args:
             received_messages: RescueAgent.received_messages (list of Message).
-            action_count: Number of completed actions so far (for gating LLM calls).
+            action_count: Unused; kept for API compatibility.
         """
-        # Harvest completed inbound future (free — no LLM call, just polling)
-        if self._inbound_future is not None and self._inbound_future.done():
-            try:
-                raw = self._inbound_future.result()
-                parsed = parse_json_response(raw)
-                if parsed:
-                    self._process_parsed_inbound(parsed)
-            except Exception as e:
-                logger.warning(f"Inbound processing future failed: {e}")
-            finally:
-                self._inbound_future = None
-
-        # Submit new batch if new messages and no pending parse
-        if self._inbound_future is not None:
-            return
-
         new_msgs = received_messages[self._last_processed_msg_index:]
         if not new_msgs:
             return
 
-        batch = new_msgs[:self.MAX_INBOUND_BATCH]
-        self._last_processed_msg_index += len(batch)
-
-        msg_texts = []
-        for m in batch:
+        for m in new_msgs:
             content = m.content if hasattr(m, 'content') else str(m)
             from_id = m.from_id if hasattr(m, 'from_id') else 'unknown'
-            msg_texts.append(f"[{from_id}]: {content}")
+            self._stored_messages.append({'from_id': from_id, 'content': content})
+            logger.debug(f"Stored inbound message from {from_id}: {content[:80]}")
 
-        system_prompt = self._prompts.get('comm_inbound_system', '').format()
-        user_template = self._prompts.get('comm_inbound_user', 'Parse: {messages}')
-        user_prompt = user_template.format(messages='\n'.join(msg_texts))
-
-        self._inbound_future = query_llm_async(
-            model=self._llm_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            api_url=self._api_url,
-            few_shot_messages=load_few_shot('comm_inbound'),
-        )
-
-    def _process_parsed_inbound(self, parsed: dict) -> None:
-        """Write extracted intel entries from parsed inbound LLM result to memory.
-
-        Expected format:
-            {"entries": [{"type": "intel_...", ...}, ...]}
-
-        Entries of type "intel_help_requested" are additionally written into
-        self._world_memory['pending_help_requests'] (if world_memory was provided).
-        """
-        entries = parsed.get('entries', [])
-        if isinstance(entries, dict):
-            entries = [entries]
-        for entry in entries:
-            if not (isinstance(entry, dict) and entry.get('type')):
-                continue
-            self._memory.update('comm_intel', entry)
-
-            # Mirror help requests into the structured MEMORY dict
-            if entry.get('type') == 'intel_help_requested' and self._world_memory is not None:
-                request = {
-                    'location': entry.get('location'),
-                    'message': entry.get('message', ''),
-                    'sender': entry.get('sender', 'unknown'),
-                }
-                existing = self._world_memory.setdefault('pending_help_requests', [])
-                # Avoid duplicates: skip if same sender+message already present
-                is_dup = any(
-                    r.get('sender') == request['sender'] and r.get('message') == request['message']
-                    for r in existing
-                )
-                if not is_dup:
-                    existing.append(request)
+        self._last_processed_msg_index += len(new_msgs)
 
     # ------------------------------------------------------------------
     # Context for reasoning prompt

@@ -47,7 +47,6 @@ summarize_user: |
 answer_question_system: |
   You are the central planner for a search & rescue mission.
   An agent is asking you a question about their task or the mission.
-  You have broad context: all task assignments, iteration history, and scores.
   Answer concisely (under 60 words). Be specific and actionable.
   If the agent should coordinate with another agent, say which one and why.
   Do NOT assign new tasks — only answer the question asked.
@@ -56,10 +55,8 @@ answer_question_system: |
 answer_question_user: |
   AGENT: {agent_id}
   QUESTION: {question}
-  AGENT CONTEXT: {agent_context}
   CURRENT TASKS: {current_tasks}
-  LAST SUMMARY: {last_summary}
-  SCORE: {score_info}
-  ITERATION: {iteration}
-
-  Answer this agent's question based on your mission-wide knowledge.
+  WORLD_STATE:
+  {world_state_summary}
+  
+  Answer this agent's question based on your knowledge.

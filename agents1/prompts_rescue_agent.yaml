@@ -17,9 +17,7 @@ reasoning_user: |
   TASK: {current_task}
   POS: {agent_pos}  CARRYING: {carrying}
   NEARBY: {nearby_json}
-  LAST_ACTIONS:
-    {prev_action}
-  {planner_context}
+  LAST_ACTIONS:{prev_action}
 
 # ---------------------------------------------------------------------------
 # Planning: decompose a high-level task into ordered sub-tasks
@@ -50,7 +48,7 @@ planning_decompose_user: |
 # Reasoning:
 # ---------------------------------------------------------------------------
 reason_system: |
-  You are a LOW-LEVEL EXECUTOR on a 2-D grid.
+  You are a LOW-LEVEL EXECUTOR in a search and rescue simulation.
   Execute ONLY the CURRENT SUBTASK. Do NOT change goals.
 
   Reply with ONE JSON object only: {{"action":str,"params":dict}}
@@ -62,14 +60,13 @@ reason_system: |
   Drop(object_id) DropObjectTogether(object_id)
   SendMessage(target_location,action_needed,object_id,context)
   BroadcastObservation() SendAcceptHelpMessage(help_message)
-  AskPlanner(question) — ask the central planner for guidance about your task or the mission
-  SendDirectMessage(target_agent, message, context) — send a direct message to a specific teammate
-  Idle()
+  AskPlanner(question)
+  SendDirectMessage(target_agent, message, context)
 
   RULES:
   - Must be adjacent (Chebyshev 1) to interact with targets.
   - Obstacles block movement; move adjacent first, then RemoveObject.
-  - Use only object_ids from NEARBY. No "@" in IDs.
+  - Use only object_ids from NEARBY.
   - DO NOT REPEAT the same action as in the past if you are in the same location as before
   - No extra text outside JSON.
   - If there is an obstacle in NEARBY blocking your path, return RemoveObject or SendMessage to ask for help.

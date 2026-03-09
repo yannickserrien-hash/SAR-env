@@ -19,6 +19,7 @@ if __name__ == "__main__":
     num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
     include_human = False        # Whether to add a keyboard-controlled human agent
     ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
+    planner_model = 'gemma3:12b'  # Larger model for the EnginePlanner (main brain)
 
     # Scale LLM thread pool for the number of agents
     init_llm_pool(num_rescue_agents)
@@ -52,7 +53,7 @@ if __name__ == "__main__":
     planner = EnginePlanner(
         max_iterations=50,
         score_file=score_file,
-        llm_model='llama3:8b',
+        llm_model=planner_model,
         ticks_per_iteration=ticks_per_iteration,
         include_human=include_human,
         api_url=f"http://localhost:{ollama_base_port}"

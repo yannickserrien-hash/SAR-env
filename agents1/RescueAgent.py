@@ -282,7 +282,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
 
         # 2. Wait for plan if not ready
         if not self.planning_module.plan_ready and self.PLAN == '':
-            # Poll the planning LLM future
             self.planning_module.is_plan_ready()
 
             # Handle "AskPlanner" — needs clarification from EnginePlanner
@@ -311,7 +310,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                         answer = responses[0].content
                         self.planning_module.receive_answer(answer)
                         self._planning_question_submitted = False
-                        print(f"[{self.agent_id}] Planner answered: {answer[:80]}")
+                        print(f"[{self.agent_id}] Planner answered: {answer}")
 
             # Idle while waiting for plan/clarification
             return Idle.__name__, {'duration_in_ticks': 1}
@@ -320,7 +319,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         if self.PLAN == '' and self.planning_module.plan_ready:
             self.PLAN = self.planning_module.get_plan
             self._reasoning_step = True
-            print(f"[{self.agent_id}] Plan ready: {self.PLAN[:120]}")
+            print(f"[{self.agent_id}] Plan ready: {self.PLAN}")
 
         # ===== Execution phase =====
 
@@ -362,16 +361,11 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         if self._reasoning_step:
             with self._llm_lock:
                 if self._pending_llm_action is None and self.PLAN:
-                    planner_ctx = ""
-                    if self._planner_responses:
-                        planner_ctx = "\n".join(
-                            f"- {r}" for r in self._planner_responses[-2:]
-                        )
+
                     self._pending_llm_action = self.reasoning_module(
                         self.PLAN,
                         observation=self.OBS,
                         previous_action=self.past_actions,
-                        planner_context=planner_ctx,
                     )
                     self._reasoning_step = False
         return Idle.__name__, {'duration_in_ticks': 1}

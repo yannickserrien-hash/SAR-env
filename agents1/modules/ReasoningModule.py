@@ -16,11 +16,10 @@ class ReasoningIO(ReasoningBase):
     """
 
     def __call__(self, task_description: str, observation, previous_action,
-                 feedback: str = '', planner_context: str = ''):
+                 feedback: str = ''):
         system_prompt = self._prompts['reason_system'].strip().format()
         user_prompt = self._build_reasoning_prompt(
-            task_description, observation, previous_action, planner_context
-        )
+            task_description, observation, previous_action)
 
         return query_llm_async(
             model=self.llm_model,
@@ -30,8 +29,7 @@ class ReasoningIO(ReasoningBase):
             few_shot_messages=load_few_shot('reasoning'),
         )
 
-    def _build_reasoning_prompt(self, task_description, observation, previous_action,
-                                planner_context: str = '') -> str:
+    def _build_reasoning_prompt(self, task_description, observation, previous_action) -> str:
         import json as _json
 
         # --- Extract agent pos + carrying from observation dict ---
@@ -51,17 +49,12 @@ class ReasoningIO(ReasoningBase):
                 f"{i + 1}. {a}" for i, a in enumerate(previous_action)
             )
 
-        planner_section = ""
-        if planner_context:
-            planner_section = f"\n  PLANNER_ADVICE:\n    {planner_context}"
-
         user_prompt = self._prompts['reasoning_user'].format(
             current_task=task_description,
             agent_pos=agent_pos,
             carrying=carrying_str,
             nearby_json=nearby_json,
             prev_action=previous_action,
-            planner_context=planner_section,
         )
 
         return user_prompt
