@@ -15,7 +15,9 @@ from matrx.actions.object_actions import RemoveObject
 from matrx.objects import EnvObject
 from matrx.world_builder import RandomProperty
 from matrx.goals import WorldGoal
-from agents1.RescueAgent import RescueAgent
+from agents1.agents_graveyard.RescueAgent import RescueAgent
+from agents1.search_rescue_agent import SearchRescueAgent
+from memory.shared_memory import SharedMemory
 from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
 from loggers.ActionLogger import ActionLogger
@@ -73,7 +75,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         condition: Task difficulty condition
         name: Human agent name
         folder: Working folder path
-        agent_type: Type of AI agent to use ('baseline' or 'llm')
+        agent_type: Type of AI agent to use ('baseline', 'llm', or 'langgraph')
         num_rescue_agents: Number of LLM-based RescueAgents (1-5)
         include_human: Whether to add a keyboard-controlled human agent
         ollama_base_port: Base port for Ollama instances (agent N uses base_port + N)
@@ -85,6 +87,8 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
 
     agents = []
     shared_message_log = []  # shared across all agents for the entire game
+    # Shared memory for MARBLE agents (thread-safe, one instance per run)
+    marble_shared_memory = SharedMemory()
     for team in range(nr_teams):
         team_name = f"Team {team}"
         # Add the artificial agents based on condition and agent_type
@@ -92,11 +96,24 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
             agent_name = f"RescueBot{agent_nr}"
             if agent_type == 'llm':
                 brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
-                                    llm_model='llama3:8b', include_human=include_human,
+                                    llm_model='qwen2.5:3b', include_human=include_human,
                                     ollama_port=ollama_base_port + agent_nr + 1,
                                     shared_message_log=shared_message_log)
                 agents.append(brain)
                 print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
+            elif agent_type == 'marble':
+                brain = SearchRescueAgent(
+                    slowdown=8,
+                    condition=condition,
+                    name=name,
+                    folder=folder,
+                    llm_model='ollama/qwen3:8b',
+                    strategy='react',
+                    include_human=include_human,
+                    shared_memory=marble_shared_memory,
+                )
+                agents.append(brain)
+                print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")
 
             loc = _AGENT_START_POSITIONS[agent_nr % len(_AGENT_START_POSITIONS)]
             builder.add_agent(loc, brain, team=team_name, name=agent_name,
@@ -123,6 +140,9 @@ def add_victims(builder):
     builder.add_object((23,14),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured woman.svg",drop_zone_nr=0)
     builder.add_object((23,15),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured cat.svg",drop_zone_nr=0)
 
+    builder.add_object((22,11),'mildly injured woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured woman.svg", area="area 7")
+    
+    
     # builder.add_object((10,15),'critically injured elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured elderly woman.svg", area="area 9")
     # builder.add_object((8,20),'healthy elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly woman.svg", area="area 12")
     # builder.add_object((14,14),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 10")
@@ -130,25 +150,25 @@ def add_victims(builder):
     # builder.add_object((2,14),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 8")
     builder.add_object((10,3),'critically injured girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured girl.svg", area="area 2")
     builder.add_object((2,2),'mildly injured boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured boy.svg", area="area 1")
-    builder.add_object((16,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 3")
+    # builder.add_object((16,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 3")
     # builder.add_object((14,20),'mildly injured elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured elderly man.svg", area="area 13")
-    builder.add_object((10,8),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 6")
+    # builder.add_object((10,8),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 6")
     builder.add_object((14,8),'mildly injured woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured woman.svg", area="area 7")
     # builder.add_object((16,21),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 13")
     builder.add_object((8,9),'critically injured dog', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured dog.svg", area="area 6")
     # builder.add_object((4,21),'mildly injured cat', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured cat.svg", area="area 11")
     # builder.add_object((10,21),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 12")
-    builder.add_object((16,9),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 7")
-    builder.add_object((22,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 4")
+    # builder.add_object((16,9),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 7")
+    # builder.add_object((22,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 4")
     # builder.add_object((2,20),'healthy elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly woman.svg", area="area 11")
-    builder.add_object((20,2),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 4")
+    # builder.add_object((20,2),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 4")
     # builder.add_object((20,20),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 14")
     # builder.add_object((22,21),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 14")
     # builder.add_object((8,14),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 9")
-    builder.add_object((4,3),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 1")
-    builder.add_object((14,2),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 3")
+    # builder.add_object((4,3),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 1")
+    # builder.add_object((14,2),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 3")
     # builder.add_object((16,15),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 10")
-    builder.add_object((8,2),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 2")
+    # builder.add_object((8,2),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 2")
 
 def add_obstacles(builder):
     builder.add_object((3,4),'rock',ObstacleObject,visualize_shape='img',img_name="/images/stone.svg")

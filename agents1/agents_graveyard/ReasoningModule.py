@@ -1,18 +1,24 @@
 import re
-from engine.llm_utils import query_llm_async, parse_json_response, load_few_shot
+from engine.llm_utils import (
+    query_llm_async, query_llm_with_tools_async,
+    parse_json_response, load_few_shot,
+)
+from agents1.agents_graveyard.matrx_tool_description import REASONING_TOOLS
 from memory.short_term_memory import ShortTermMemory
 
 
 class ReasoningBase:
     def __init__(self, llm_model, prompts=None, api_url=None):
         self.llm_model = llm_model
-        self._prompts = prompts 
+        self._prompts = prompts
         self._api_url = api_url
 
 
 class ReasoningIO(ReasoningBase):
     """
         LLM reasoning module that converts task descriptions into action decisions.
+        Uses Ollama tool calling: the model receives structured tool descriptions
+        and returns a tool_call instead of free-form JSON.
     """
 
     def __call__(self, task_description: str, observation, previous_action,
@@ -20,15 +26,15 @@ class ReasoningIO(ReasoningBase):
         system_prompt = self._prompts['reason_system'].strip().format()
         user_prompt = self._build_reasoning_prompt(
             task_description, observation, previous_action, world_state, feedback)
-        
+
         print("User Prompt:\n", user_prompt)
 
-        return query_llm_async(
+        return query_llm_with_tools_async(
             model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            tools=REASONING_TOOLS,
             api_url=self._api_url,
-            few_shot_messages=load_few_shot('reasoning'),
         )
 
     def _build_reasoning_prompt(self, task_description, observation, previous_action,

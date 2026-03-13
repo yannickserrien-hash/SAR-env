@@ -26,7 +26,7 @@ def _find_partner_agent(world_state, agent_id):
         inheritance = val.get('class_inheritance', [])
         if not isinstance(inheritance, list):
             continue
-        if 'AgentBody' in inheritance:
+        if 'SearchRescueAgent' in inheritance:
             loc = val.get('location')
             if loc is not None:
                 d = get_distance(agent_loc, loc)
@@ -416,11 +416,9 @@ class CarryObject(Action):
         env_obj.carried_by.append(agent_id)
         reg_ag.is_carrying.append(env_obj)  # we add the entire object!
 
-        if 'healthy' in object_id and kwargs['human_name'] in agent_id:
+        if 'healthy' in object_id:
             reg_ag.change_property("img_name", "/images/carry-healthy-human.svg")
 
-        if 'mild' in object_id and kwargs['human_name'] in agent_id:
-            reg_ag.change_property("img_name", "/images/carry-mild-human.svg")
         #if 'critical' in object_id and 'bot' in agent_id:
             # change our image 
         #    reg_ag.change_property("img_name", "/images/carry-critical-robot.svg")
@@ -625,10 +623,7 @@ class Drop(Action):
             objects can be on the same location.
         """
         reg_ag = grid_world.registered_agents[agent_id]
-        if kwargs['human_name'] in agent_id and len(reg_ag.is_carrying)<2:
-            reg_ag.change_property("img_name", "/images/rescue-man-final3.svg")
-        if 'bot' in agent_id:
-            reg_ag.change_property("img_name", "/images/robot-final4.svg")
+        reg_ag.change_property("img_name", "/images/robot-final4.svg")
 
         # fetch range from kwargs
         drop_range = 1 if 'drop_range' not in kwargs else kwargs['drop_range']
@@ -795,10 +790,13 @@ class CarryObjectTogether(Action):
         partner = _find_partner_agent(world_state, agent_id)
 
         if partner is None:
+            print("GrabObjectResult.NOT_IN_RANGE.")
             return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
         if object_id and get_distance(partner['location'], world_state[object_id]['location']) > grab_range:
+            print("GrabObjectResult.NOT_IN_RANGE 2.")
             return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
         else:
+            print("GrabObjectResult.ACTION_SUCCEEDED.")
             return _is_possible_grab(grid_world, agent_id=agent_id, object_id=object_id, grab_range=grab_range,
                                  max_objects=max_objects)
 
@@ -874,10 +872,10 @@ class CarryObjectTogether(Action):
 
         # change carry image based on who is carrying
         object_id = None if 'object_id' not in kwargs else kwargs['object_id']
-        human_name = kwargs.get('human_name', '')
-        if 'critical' in object_id and human_name in agent_id:
+        partner_name = kwargs.get('partner_name', '')
+        if 'critical' in object_id and partner_name in agent_id:
             agent.change_property("img_name", "/images/carry-critical-final.svg")
-        if 'mild' in object_id and human_name in agent_id:
+        if 'mild' in object_id and partner_name in agent_id:
             agent.change_property("img_name", "/images/carry-mild-final.svg")
 
         # Remove it from the grid world (it is now stored in the is_carrying list of the AgentAvatar
@@ -1098,8 +1096,8 @@ class DropObjectTogether(Action):
             partner_body.change_property("visualize_opacity", 1)
 
         # Reset the carrying agent's image to default
-        human_name = kwargs.get('human_name', '')
-        if human_name and human_name in agent_id:
+        partner_name = kwargs.get('partner_name', '')
+        if partner_name and partner_name in agent_id:
             agent.change_property("img_name", "/images/rescue-man-final3.svg")
         else:
             agent.change_property("img_name", "/images/robot-final4.svg")

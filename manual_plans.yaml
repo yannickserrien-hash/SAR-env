@@ -30,23 +30,19 @@ iterations:
       task: "Explore area 1 and rescue any victims found"
       plan: |
         1. Move to area_1 door at [3, 4]
-        2. Check for obstacles. If present, remove
-        3. Navigate inside area_1
-        4. Check NEARBY for victims.
-            - If a victim is found, carry it
-        5. Navigate to Drop Zone
-        6. Drop the victim at the drop zone
+        2. MoveNorth
+        3. Carry victim if it is in the nearby cells
+        4. Navigate to Drop Zone
+        5. Drop the victim at the drop zone
 
     rescuebot1:
       task: "Explore area 2 and rescue any victims found"
       plan: |
         1. Move to area_2 door at [9, 4]
-        2. Check for obstacles. If present, remove
-        3. Navigate inside area_2
-        4. Check NEARBY for victims.
-            - If a victim is found, carry it
-        5. Navigate to Drop Zone
-        6. Drop the victim at the drop zone
+        2. MoveNorth
+        3. Carry victim if it is in the nearby cells
+        4. Navigate to Drop Zone
+        5. Drop the victim at the drop zone
 
   # --- Iteration 2 ---
   - rescuebot0:

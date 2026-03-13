@@ -45,7 +45,7 @@ class EnginePlanner:
         self,
         max_iterations: int = 100,
         score_file: str = "logs/score.json",
-        llm_model: str = 'llama3:8b',
+        llm_model: str = 'qwen3:8b',
         ticks_per_iteration: int = 100,
         include_human: bool = True,
         api_url: str = None,

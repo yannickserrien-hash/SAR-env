@@ -388,8 +388,8 @@ class GridWorld:
                     agent_plans = task_assignments.get('plans', {})
                     for agent in agents:
                         aid = getattr(agent, 'agent_id', None)
-                        if aid in agent_plans and hasattr(agent, 'set_manual_plan'):
-                            agent.set_manual_plan(agent_plans[aid])
+                        if aid in agent_plans and hasattr(agent, 'set_manual_task_decomposition'):
+                            agent.set_manual_task_decomposition(agent_plans[aid])
                             print(f"[GridWorld] Sent manual plan to {aid}:\n{agent_plans[aid]}")
 
                     # Inject mid-iteration re-task callback so agents can request a new

@@ -14,12 +14,12 @@ if __name__ == "__main__":
     # Configuration
     condition = "normal"
     name = "humanagent"
-    agent_type = 'llm'
+    agent_type='marble'              # 'llm' | 'langgraph' | 'baseline'
     ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
     num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
     include_human = False        # Whether to add a keyboard-controlled human agent
     ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
-    planner_model = 'gemma3:12b'  # Larger model for the EnginePlanner (main brain)
+    planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
 
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
@@ -63,7 +63,7 @@ if __name__ == "__main__":
         api_url=f"http://localhost:{ollama_base_port}",
         manual_plans_file=manual_plans_file,
     )
-
+    
     # Run with MARBLE-style planning loop
     builder.api_info['matrx_paused'] = False
     iteration_history = world.run_with_planner(

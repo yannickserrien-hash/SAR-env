@@ -15,6 +15,7 @@ Each RescueAgent uses `llama3:8b` for per-tick reasoning.
 ```bash
 ollama pull llama3:8b       # Used by RescueAgents
 ollama pull gemma3:27b      # Used by EnginePlanner
+ollama pull qwen3:8b
 ```
 
 You can change which model the planner uses by editing `planner_model` in `main.py`.

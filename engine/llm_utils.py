@@ -13,8 +13,22 @@ import threading
 import concurrent.futures
 import requests
 from typing import Optional, List, Dict
+from ollama import Client
 
 OLLAMA_BASE_URL = "http://localhost:11434"
+
+# ── Ollama SDK client cache (thread-safe, one Client per host URL) ────────
+_client_cache: Dict[str, Client] = {}
+_client_lock = threading.Lock()
+
+
+def _get_client(api_url: str = None) -> Client:
+    """Return a cached Ollama Client for the given host URL."""
+    host = api_url or OLLAMA_BASE_URL
+    with _client_lock:
+        if host not in _client_cache:
+            _client_cache[host] = Client(host=host)
+        return _client_cache[host]
 
 # ── Few-shot loader ─────────────────────────────────────────────────────────
 _FEW_SHOT_FILE = os.path.join(
@@ -174,6 +188,99 @@ def query_llm_async(
         model,
         system_prompt,
         user_prompt,
+        max_tokens,
+        temperature,
+        api_url,
+        few_shot_messages,
+    )
+
+
+def query_llm_with_tools(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    tools: List[Dict],
+    max_tokens: int = 1000,
+    temperature: float = 0.1,
+    api_url: str = None,
+    few_shot_messages: Optional[List[Dict]] = None,
+) -> Optional[dict]:
+    """Query an LLM via the Ollama Python SDK with tool calling.
+
+    Sends structured tool descriptions so the model returns a
+    ``tool_calls`` response instead of free-form text.
+
+    Returns:
+        A dict ``{"name": str, "arguments": dict}`` from the first tool
+        call, or a fallback string if the model returned plain text, or
+        *None* on error.
+    """
+    client = _get_client(api_url)
+
+    # Build messages array with proper role separation
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    if few_shot_messages:
+        messages.extend(few_shot_messages)
+    messages.append({"role": "user", "content": user_prompt})
+
+    try:
+        response = client.chat(
+            model=model,
+            messages=messages,
+            tools=tools,
+            options={
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            },
+        )
+
+        # ── Structured tool call ──
+        if response.message.tool_calls:
+            call = response.message.tool_calls[0]
+            name = call.function.name
+            arguments = call.function.arguments or {}
+            if name:
+                return {"name": name, "arguments": arguments}
+
+        # ── Fallback: model returned plain text instead of a tool call ──
+        content = response.message.content or ""
+        if content:
+            logger.info("Tool-call model returned text instead of tool_call, "
+                        "falling back to text parsing.")
+            return content  # caller can run parse_json_response on this
+
+        return None
+
+    except Exception as e:
+        logger.error("LLM tool-call query failed: %s", e)
+        return None
+
+
+def query_llm_with_tools_async(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    tools: List[Dict],
+    max_tokens: int = 1000,
+    temperature: float = 0.1,
+    api_url: str = None,
+    few_shot_messages: Optional[List[Dict]] = None,
+) -> concurrent.futures.Future:
+    """Non-blocking version of ``query_llm_with_tools``.
+
+    Returns a ``Future`` whose result is the same type as
+    ``query_llm_with_tools``: either a tool-call dict, a fallback
+    string, or None.
+    """
+    print("LLM queried (tool-calling)")
+    return _get_executor().submit(
+        query_llm_with_tools,
+        model,
+        system_prompt,
+        user_prompt,
+        tools,
         max_tokens,
         temperature,
         api_url,

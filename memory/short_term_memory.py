@@ -27,7 +27,7 @@ class ShortTermMemory(BaseMemory):
     to merge old entries, keeping the storage within ``memory_limit``.
     """
 
-    def __init__(self, memory_limit: int = 20, llm_model: str = 'llama3:8b', api_url: str = None) -> None:
+    def __init__(self, memory_limit: int = 20, llm_model: str = 'qwen3:8b', api_url: str = None) -> None:
         """
         Args:
             memory_limit: Maximum number of entries before compression kicks in.

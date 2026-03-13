@@ -237,7 +237,7 @@ class HumanBrain(HumanAgentBrain):
             action_kwargs['grab_range'] = self.__grab_range
             # Set max amount of objects
             action_kwargs['max_objects'] = self.__max_carry_objects
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
 
             # grab the closest victim
             obj_id = self.__select_random_obj_in_range(state,
@@ -253,7 +253,7 @@ class HumanBrain(HumanAgentBrain):
         elif action == DropObjectTogether.__name__:
             action_kwargs['strength'] = self.__strength
             action_kwargs['drop_range'] = self.__drop_range
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
             pass            
 
         if action == CarryObject.__name__:
@@ -264,7 +264,7 @@ class HumanBrain(HumanAgentBrain):
             action_kwargs['max_objects'] = self.__max_carry_objects
             action_kwargs['object_id'] = None
             action_kwargs['strength'] = self.__strength
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
 
             obj_id = \
                 self.__select_random_obj_in_range(state,
@@ -280,7 +280,7 @@ class HumanBrain(HumanAgentBrain):
             # Set drop range
             action_kwargs['strength'] = self.__strength
             action_kwargs['drop_range'] = self.__drop_range
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
             pass
 
         # If the user chose to remove an object
@@ -288,7 +288,7 @@ class HumanBrain(HumanAgentBrain):
             # Assign it to the arguments list
             # Set drop range
             action_kwargs['remove_range'] = self.__remove_range
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
 
             obj_id = \
                 self.__select_random_obj_in_range(state,
@@ -305,7 +305,7 @@ class HumanBrain(HumanAgentBrain):
             # Assign it to the arguments list
             # Set drop range
             action_kwargs['remove_range'] = self.__remove_range
-            action_kwargs['human_name'] = self.__name
+            action_kwargs['partner_name'] = self.__name
 
             obj_id = \
                 self.__select_random_obj_in_range(state,

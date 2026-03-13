@@ -37,34 +37,24 @@ reason_system: |
   You are a LOW-LEVEL EXECUTOR in a search and rescue simulation.
   Execute ONLY the CURRENT SUBTASK. Do NOT change goals.
 
-  Reply with ONE JSON object only: {{"action":str,"params":dict, "completing_subtask":str}}
-  Always add which subtask you are completing in the "completing_subtask" field.
-
-  ACTIONS:
-  MoveTo(x,y) NavigateToDropZone() MoveNorth() MoveSouth() MoveEast() MoveWest()
-  RemoveObject(object_id) RemoveObjectTogether(object_id)
-  CarryObject(object_id) CarryObjectTogether(object_id)
-  Drop(object_id) DropObjectTogether(object_id)
+  Call exactly ONE tool per turn to execute your action.
+  The available tools describe all actions you can take.
 
   RULES:
-  - If injured victims are in Current Observation, do CarryObject.
+  - If injured victims are in Current Observation, prioritize rescuing them first.
   - Healthy victims do not need to be rescued.
   - Must be adjacent to interact with targets.
   - Obstacles block movement; move adjacent first, then RemoveObject.
-  - Use only object_ids from NEARBY.
-  - DO NOT REPEAT the same action as in the past if you are in the same location as before.
-  - No extra text outside JSON.
   - If the current plan does not match what you observe, or you cannot make progress, use Replan to request a new plan.
-  - Use TaskComplete when you have finished all steps of the current task.
-  - If ACTION FEEDBACK reports a failure, do NOT repeat the failed action. Try a different approach or Replan.
+  - If ACTION FEEDBACK reports a failure, do NOT repeat the failed action. Try a different approach.
 
 
 # ---------------------------------------------------------------------------
 # Reasoning: user prompt template for the main per-tick decision call
 # ---------------------------------------------------------------------------
 reasoning_user: |
+  Current Observation: {nearby_json}
   TASK: {current_task}
   YOUR POSITION: {agent_pos}  CARRYING: {carrying}
-  Current Observation: {nearby_json}
   LAST ACTIONS:{prev_action}
   ACTION FEEDBACK: {action_feedback}

@@ -21,10 +21,10 @@ from matrx.agents.agent_utils.state import State
 from matrx.agents.agent_utils.navigator import Navigator
 from matrx.agents.agent_utils.state_tracker import StateTracker
 from matrx.messages.message import Message
-from agents1.modules.ReasoningModule import ReasoningIO
-from agents1.modules.PerceptionModule import PerceptionModule
+from agents1.agents_graveyard.ReasoningModule import ReasoningIO
+from agents1.agents_graveyard.PerceptionModule import PerceptionModule
 from agents1.modules.CommunicationModule import CommunicationModule
-from agents1.modules.PlanningModule import PlanningModule
+from agents1.agents_graveyard.PlanningModule import PlanningModule
 from memory.short_term_memory import ShortTermMemory
 
 from brains1.ArtificialBrain import ArtificialBrain
@@ -50,7 +50,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         condition: str,
         name: str,
         folder: str,
-        llm_model: str = 'llama3:8b',
+        llm_model: str = 'qwen3:8b',
         include_human: bool = True,
         ollama_port: int = 11434,
         shared_message_log: list = None,
@@ -245,8 +245,6 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         self._state_tracker.update(self.state_for_navigation)
         self.WORLD_STATE_FILTERED = self.process_observations(filtered_state)
         self.OBS = self.observation_to_dict(filtered_state)
-        print(f"[{self.agent_id}] self.OBS: {self.OBS}")
-        print(f"[{self.agent_id}] self.WORLD_STATE_FILTERED: {self.WORLD_STATE_FILTERED}")
         self._last_filtered_state = filtered_state
 
         # 1b. ACTION FAILURE DETECTION — compare with previous tick's state
@@ -390,6 +388,10 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
         if self._last_llm_result is not None:
             result = self._last_llm_result
             self._last_llm_result = None
+            # Tool-calling returns a dict {"name":..,"arguments":..}
+            # Fallback returns a raw string
+            if isinstance(result, dict):
+                return self.tool_call_to_action(result)
             return self.text_to_action(result)
 
         # Submit new LLM call
@@ -461,9 +463,27 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             'action': action
         })
         
+    def tool_call_to_action(self, tool_call: dict) -> Tuple[str, Dict]:
+        """Convert a structured tool-call dict to a MATRX action.
+
+        ``tool_call`` has the shape ``{"name": str, "arguments": dict}``
+        as returned by Ollama's /api/chat tool-calling feature.  We
+        translate it into the same ``(action, params)`` format that
+        ``text_to_action`` produces, then reuse the shared dispatch logic.
+        """
+        action = tool_call.get('name', 'Idle')
+        params = tool_call.get('arguments') or {}
+        print(f"[{self.agent_id}]| Tool call: {action}({params})")
+
+        # Build the same dict that text_to_action would have parsed
+        parsed = {'action': action, 'params': params}
+        return self._dispatch_action(parsed)
+
     def text_to_action(self, llm_response: str) -> Tuple[str, Dict]:
         """
-            Convert LLM action decision to MATRX action.
+            Convert LLM action decision (free-form text) to MATRX action.
+            Fallback path used when the model returns plain text instead
+            of a structured tool call.
         """
         self._pending_llm_action = None
         # --- Ask Planner for guidance ---
@@ -489,7 +509,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 self._logger.info(f"[{self.agent_id}] Asked planner: {question}")
             self._reasoning_step = True
             return Idle.__name__, {'duration_in_ticks': 1}
-        
+
         parsed_response = parse_json_response(llm_response)
         if parsed_response is not None:
                 print(f"[{self.agent_id}]| Action: {parsed_response}")
@@ -497,14 +517,30 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             print(f"[{self.agent_id}]| PARSE of LLM response FAILED")
             self._reasoning_step = True
             return Idle.__name__, {'duration_in_ticks': 1}
-            
-        action = parsed_response.get('action', 'Idle')
-        params = parsed_response.get('params') or {}
+
+        return self._dispatch_action(parsed_response)
+
+    # ── Shared dispatch logic (used by both tool_call_to_action and text_to_action) ──
+
+    def _dispatch_action(self, parsed_response: dict) -> Tuple[str, Dict]:
+        """Route a parsed action dict to the corresponding MATRX action.
+
+        ``parsed_response`` must have the shape
+        ``{"action": str, "params": dict, ...}``  (from text_to_action)
+        or  ``{"name": str, "arguments": dict}``  (from tool_call_to_action,
+        which normalises it before calling here).
+        """
+        # Normalise: tool_call_to_action sends {"action":..,"params":..}
+        action = parsed_response.get('action') or parsed_response.get('name', 'Idle')
+        params = parsed_response.get('params') or parsed_response.get('arguments') or {}
         object_id = params.get('object_id')
 
         # Track target object for failure detection on next tick
         if action in ('CarryObject', 'CarryObjectTogether',
                        'RemoveObject', 'RemoveObjectTogether'):
+            if object_id is None:
+                self._reasoning_step = True
+                self._last_action_feedback = f"{action} missing object_id in params. Give the correct object_id in params to execute properly."
             self._last_action_target_id = object_id
         else:
             self._last_action_target_id = None
@@ -514,7 +550,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             return action, {}
 
         self._record_action_in_memory(f"{action}({params}), {object_id}")
-        
+
         # --- MoveTo navigation ---
         if action == 'MoveTo':
             coords = self._parse_coordinates(params)
@@ -560,7 +596,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
                 'remove_range': 1,
                 'human_name': self._human_name
             }
-            
+
         # --- Communication actions ---
         if action in ('BroadcastObservation', 'SendMessage', 'SendAcceptHelpMessage'):
             tick = 0
@@ -579,7 +615,7 @@ class RescueAgent(PerceptionModule, ArtificialBrain):
             elif action == 'SendMessage':
                 self.communication_module.send_templated_message(
                     'help_request', tick,
-                    target_location=json.dumps(params.get('target_location', [0, 0])),
+                    target_location=json.dumps([params.get('target_x', 0), params.get('target_y', 0)]),
                     action_needed=params.get('action_needed', 'RemoveObjectTogether'),
                     object_id=params.get('object_id', ''),
                 )

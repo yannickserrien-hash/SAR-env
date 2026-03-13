@@ -338,7 +338,11 @@ class ArtificialAgentBrain(AgentBrain):
         action_results : ActionResult
             An ActionResult object containing the success or failure of the action, and (if failed) the reason why.
         """
-        action_result = self.__callback_is_action_possible(self.agent_id, action, action_kwargs)
+        # GridWorld.__check_action_is_possible requires world_state as a 4th arg.
+        # self.state holds the agent's current (filtered) state which is sufficient
+        # for all built-in feasibility checks: it always contains the agent itself,
+        # all teammates, and every object within grab_range=1.
+        action_result = self.__callback_is_action_possible(self.agent_id, action, action_kwargs, self.state)
 
         return action_result.succeeded, action_result
 
