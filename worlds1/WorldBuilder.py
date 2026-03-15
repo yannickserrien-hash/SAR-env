@@ -66,7 +66,8 @@ _AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 
 # Add the agents to the world
 def add_agents(builder, condition, name, folder, agent_type='baseline',
-               num_rescue_agents=1, include_human=True, ollama_base_port=11434):
+               num_rescue_agents=1, include_human=True, ollama_base_port=11434,
+               planning_mode='simple'):
     """
     Add agents to the world.
 
@@ -79,6 +80,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         num_rescue_agents: Number of LLM-based RescueAgents (1-5)
         include_human: Whether to add a keyboard-controlled human agent
         ollama_base_port: Base port for Ollama instances (agent N uses base_port + N)
+        planning_mode: Planning strategy for MARBLE agents ('simple' or 'dag')
     """
     # Define the agent's sense capabilities
     sense_capability_agent = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
@@ -111,6 +113,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     strategy='react',
                     include_human=include_human,
                     shared_memory=marble_shared_memory,
+                    planning_mode=planning_mode,
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")
@@ -220,7 +223,8 @@ def add_water(builder):
 
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
-                   num_rescue_agents=1, include_human=True, ollama_base_port=11434):
+                   num_rescue_agents=1, include_human=True, ollama_base_port=11434,
+                   planning_mode='simple'):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -284,7 +288,8 @@ def create_builder(condition, name, folder, agent_type='baseline',
     add_drop_off_zones(builder)
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
-                        ollama_base_port=ollama_base_port)
+                        ollama_base_port=ollama_base_port,
+                        planning_mode=planning_mode)
     add_victims(builder)
     # add_obstacles(builder)
     add_decorative_objects(builder)

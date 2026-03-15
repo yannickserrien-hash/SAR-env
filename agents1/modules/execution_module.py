@@ -62,6 +62,9 @@ def execute_action(
 
     if name == 'NavigateToDropZone':
         return 'NavigateToDropZone', {}
+    
+    if name == 'SendMessage':
+        return 'SendMessage', {'message': args.get('message', "Empty"), 'send_to': args.get('send_to', "all")}
 
     # ── Solo carry / drop ─────────────────────────────────────────────────
     if name == 'CarryObject':

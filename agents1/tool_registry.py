@@ -183,7 +183,15 @@ def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
     # send_message(Message(content=f"Retrieving information from memory: {information}", from_id=self.agent_id))
     
     return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
-    
+
+@tool
+def SendMessage(message: str, send_to: str):
+    """Send a message to one or all teammates. Can be a question, help request or an answer to another agent's question.
+    Args:
+        message: A string with the message to be sent.
+        send_to: Can be the name of a specific agent, or "all" if the message should be broadcasted to all.
+    """
+    return 'SendMessage', {'message': message}, {'send_to': send_to}
 
 
 # Ordered list of every action tool — used to build the registry + LLM schemas.
@@ -193,7 +201,7 @@ ALL_ACTION_TOOLS = [
     CarryObject, CarryObjectTogether,
     Drop, DropObjectTogether,
     RemoveObject, RemoveObjectTogether,
-    Idle,
+    Idle, SendMessage
 ]
 
 

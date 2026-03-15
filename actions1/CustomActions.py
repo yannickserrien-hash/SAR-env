@@ -4,7 +4,13 @@ from matrx.objects.agent_body import AgentBody
 from matrx.objects.standard_objects import AreaTile
 from matrx.actions.object_actions import _is_drop_poss, _act_drop, _possible_drop, _find_drop_loc, GrabObject, GrabObjectResult, RemoveObject, RemoveObjectResult, DropObject
 from matrx.utils import get_distance
+from typing import Tuple
 import random
+
+# Drop-zone destination for cooperative carries (matches WorldBuilder drop zone)
+CARRY_DROP_ZONE: Tuple[int, int] = (23, 8)
+# Ticks the carry action is "in progress" before victim is delivered
+CARRY_TOGETHER_DURATION: int = 10
 
 
 def _find_partner_agent(world_state, agent_id):
@@ -746,7 +752,7 @@ class CarryObjectTogether(Action):
     who holds objects, those objects it is holding are also moved with it.
     """
 
-    def __init__(self, duration_in_ticks=0):
+    def __init__(self, duration_in_ticks=CARRY_TOGETHER_DURATION):
         super().__init__(duration_in_ticks)
 
     def is_possible(self, grid_world, agent_id, world_state, **kwargs):
@@ -844,50 +850,32 @@ class CarryObjectTogether(Action):
         inventory and all objects herein.
         """
 
-        # Additional check
-        assert 'object_id' in kwargs.keys()
-        assert 'grab_range' in kwargs.keys()
-        assert 'max_objects' in kwargs.keys()
+        assert 'object_id' in kwargs
+        assert 'grab_range' in kwargs
+        assert 'max_objects' in kwargs
 
-        # if possible:
-        object_id = kwargs['object_id']  # assign
+        object_id = kwargs['object_id']
+        reg_ag  = grid_world.registered_agents[agent_id]
+        env_obj = grid_world.environment_objects[object_id]
 
-        # Loading properties
-        reg_ag = grid_world.registered_agents[agent_id]  # Registered Agent
-        env_obj = grid_world.environment_objects[object_id]  # Environment object
-
-        # Updating properties
+        # 1. Add victim to inventory temporarily
         env_obj.carried_by.append(agent_id)
-        reg_ag.is_carrying.append(env_obj)  # we add the entire object!
+        reg_ag.is_carrying.append(env_obj)
 
-        # Find the nearest partner agent to make invisible during cooperative carry
-        partner = _find_partner_agent(world_state, agent_id)
-        if partner is not None:
-            partner_id = partner['obj_id']
-            partner_body = grid_world.registered_agents[partner_id]
-            # make the partner agent invisible
-            partner_body.change_property("visualize_opacity", 0)
-
-        agent = grid_world.registered_agents[agent_id]
-
-        # change carry image based on who is carrying
-        object_id = None if 'object_id' not in kwargs else kwargs['object_id']
-        partner_name = kwargs.get('partner_name', '')
-        if 'critical' in object_id and partner_name in agent_id:
-            agent.change_property("img_name", "/images/carry-critical-final.svg")
-        if 'mild' in object_id and partner_name in agent_id:
-            agent.change_property("img_name", "/images/carry-mild-final.svg")
-
-        # Remove it from the grid world (it is now stored in the is_carrying list of the AgentAvatar
-        succeeded = grid_world.remove_from_grid(object_id=env_obj.obj_id, remove_from_carrier=False)
+        # 2. Remove victim from the grid (will be re-registered at drop zone)
+        succeeded = grid_world.remove_from_grid(
+            object_id=env_obj.obj_id, remove_from_carrier=False
+        )
         if not succeeded:
-            return GrabObjectResult(GrabObjectResult.FAILED_TO_REMOVE_OBJECT_FROM_WORLD.replace("{OBJECT_ID}",
-                                                                                                env_obj.obj_id), False)
+            return GrabObjectResult(
+                GrabObjectResult.FAILED_TO_REMOVE_OBJECT_FROM_WORLD.replace(
+                    "{OBJECT_ID}", env_obj.obj_id
+                ), False
+            )
 
-        # Updating Location (done after removing from grid, or the grid will search the object on the wrong location)
-        env_obj.location = reg_ag.location
-
-        return GrabObjectResult(GrabObjectResult.RESULT_SUCCESS, True)
+        # 3. Deliver victim atomically to drop zone — no agent movement required
+        return _act_drop(grid_world, agent=reg_ag, env_obj=env_obj,
+                         drop_loc=list(CARRY_DROP_ZONE))
 
 
 class GrabObjectResult(ActionResult):

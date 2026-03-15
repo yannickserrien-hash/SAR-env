@@ -21,6 +21,8 @@ if __name__ == "__main__":
     ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
     planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
 
+    planning_mode = 'dag'        # 'simple' (flat list) or 'dag' (task graph with conditionals)
+
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
     manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
@@ -31,7 +33,7 @@ if __name__ == "__main__":
     builder, agents = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,
         num_rescue_agents=num_rescue_agents, include_human=include_human,
-        ollama_base_port=ollama_base_port
+        ollama_base_port=ollama_base_port, planning_mode=planning_mode
     )
 
     # Start overarching MATRX scripts and threads
