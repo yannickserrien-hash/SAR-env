@@ -8,7 +8,7 @@ LLMAgentBase is the framework foundation for all LLM-driven rescue agents. It ha
 
 **Multiple inheritance from MATRX + custom modules**: `LLMAgentBase` extends both `ArtificialBrain` (MATRX integration) and `Perception` (state serialization). `ArtificialBrain` wraps MATRX's `AgentBrain`, providing lifecycle hooks (`initialize`, `decide_on_action`) and feasibility checks (`is_action_possible`).
 
-**Async LLM submission + polling**: Agents submit LLM calls via `_submit_llm()`, storing a `Future` in `_pending_future`. Each tick, `check_if_llm_response_ready()` checks if the result is ready. If not, agent returns `Idle`. When ready, `_handle_llm_result()` parses tool calls or text fallback, validates actions, and dispatches them.
+**Async LLM submission + polling**: Agents submit LLM calls via `_submit_llm()`, storing a `Future` in `_pending_future`. Each tick, `_poll_llm_future()` checks if the result is ready. If not, agent returns `Idle`. When ready, `_handle_llm_result()` parses tool calls or text fallback, validates actions, and dispatches them.
 
 **Lifecycle orchestration**: Subclasses call `_tick_setup()` at the top of `decide_on_actions()` to update state tracking and perception. Then `_run_preamble()` runs infrastructure checks in strict order: carry retry → A* navigation → rendezvous → LLM poll. Returns `None` only when the agent should reason. This ensures infrastructure never deadlocks reasoning.
 

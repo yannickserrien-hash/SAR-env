@@ -33,7 +33,7 @@ Thread-safe Ollama client cache (`_client_cache`) ensures one `Client` instance 
 
 1. **Agent tick**: `_submit_llm(messages, tools)` calls `submit_llm_call()` → `Future` stored in `self._pending_future`
 2. **Agent returns Idle**: Agent yields control to MATRX with `_idle()` action
-3. **Next tick**: `check_if_llm_response_ready()` checks `future.done()`
+3. **Next tick**: `_poll_llm_future()` checks `future.done()`
 4. **Result ready**: `get_llm_result(future)` retrieves `List[Message]` or `None`
 5. **Parse response**:
    - Path A: Extract `tool_calls[0].function.name` and `.arguments`
@@ -82,7 +82,7 @@ Implementation: `_prefetch_future` stores next iteration's task generation. `sub
 
 **Parsing failures**: Invalid JSON logs warning with first 200 chars of response. Agent receives feedback string in next prompt.
 
-**Future exceptions**: `check_if_llm_response_ready()` wraps `future.result()` in try/except, logs exception, resets agent to reasoning state.
+**Future exceptions**: `_poll_llm_future()` wraps `future.result()` in try/except, logs exception, resets agent to reasoning state.
 
 ## Key Files
 
