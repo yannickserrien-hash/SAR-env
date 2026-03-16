@@ -1,49 +1,73 @@
-# Memory Systems (Shared & Individual)
+# Memory Systems
 
 ## Overview
 
-The codebase implements a dual-memory architecture: **SharedMemory** for thread-safe cross-agent coordination and **per-agent memory** (BaseMemory, ShortTermMemory, LongTermMemory) for individual agent state. Agents use SharedMemory to coordinate rendezvous points for cooperative carry operations, while maintaining private memories for local observations and action history.
+SAR-env uses a dual-memory architecture: thread-safe `SharedMemory` for cross-agent coordination and per-agent `BaseMemory`/`ShortTermMemory` for individual state. SharedMemory enables cooperative actions through a rendezvous mechanism that synchronizes agents for two-person carry operations.
 
-## Shared Memory Architecture
+## SharedMemory: Thread-Safe Coordination
 
-SharedMemory provides thread-safe inter-agent communication using a simple key-value store with Python's `threading.Lock`. Located in `memory/shared_memory.py`, it exposes three methods: `update(key, info)`, `retrieve(key)`, and `retrieve_all()`. All operations acquire the lock using `with self.lock:` to prevent race conditions.
+**Location**: `memory/shared_memory.py`
 
-**Instantiation**: One SharedMemory instance per simulation, created in `worlds1/WorldBuilder.py` as `marble_shared_memory = SharedMemory()` and passed to all SearchRescueAgent instances during construction.
+Simple Lock-protected key-value store using `threading.Lock`. All operations (`update()`, `retrieve()`, `retrieve_all()`) wrap dict access with `with self.lock:` to prevent race conditions when multiple agent threads read/write simultaneously.
 
-**Usage Pattern**: Agents publish coordination events (e.g., "I'm waiting at location X with victim Y") and poll for events from teammates (e.g., "Is anyone waiting for cooperative carry?").
+**Instantiation**: One instance per simulation, created in `worlds1/WorldBuilder.py` (line 92: `marble_shared_memory = SharedMemory()`) and injected into each `SearchRescueAgent` during initialization.
 
-## Rendezvous Mechanism
+### Rendezvous Mechanism
 
-The primary SharedMemory use case is cooperative victim transport. When an agent initiates `CarryObjectTogether`, it enters a retry loop (`_handle_carry_retry` in `agents1/llm_agent_base.py`) and publishes to `carry_rendezvous` key with `{agent, victim_id, location, status: 'waiting_for_partner'}`. Other agents poll this key in `_handle_rendezvous()` and navigate to the rendezvous location if status is `waiting_for_partner` and they're not the waiting agent. After delivery or timeout (100 ticks), the key is cleared by setting it to `None`.
+**Purpose**: Coordinate two agents for `CarryObjectTogether` (critically injured victims) and `RemoveObjectTogether` (large obstacles).
 
-Additionally, agents broadcast completed carry/obstacle actions to keys like `victim_{obj_id}` and `obstacle_{obj_id}` via `_maybe_share_observation()`, though these are not actively polled—they serve as a coordination log.
+**Flow** (implemented in `agents1/llm_agent_base.py`):
 
-## Per-Agent Memory
+1. **Initiator**: Agent attempts cooperative carry but partner not adjacent. Enters `_handle_carry_retry_loop()` and publishes rendezvous request:
+   ```python
+   self.shared_memory.update('carry_rendezvous', {
+       'agent': self.agent_id,
+       'victim_id': obj_id,
+       'location': agent_loc,
+       'status': 'waiting_for_partner',
+   })
+   ```
 
-Each agent maintains a private `self.memory` instance (BaseMemory by default, initialized in `LLMAgentBase.__init__`). BaseMemory is a simple append-only list (`self.storage: List[Any]`) with methods `update(key, info)` (appends), `retrieve_latest()` (returns last item), and `retrieve_all()` (returns shallow copy).
+2. **Partner Discovery**: Other agents poll `carry_rendezvous` key each tick in `_handle_rendezvous()`. If status is `'waiting_for_partner'` and agent ID differs, they navigate to the published location.
 
-**Usage**: Agents log actions (`self.memory.update('action', {...})`) and carry failures (`self.memory.update('carry_failure', {...})`). SearchRescueAgent retrieves the last 15 entries when building LLM prompts: `self.memory.retrieve_all()[-15:]`.
+3. **Blocking Wait**: Initiating agent retries carry action every tick (line 335) up to `CARRY_WAIT_TIMEOUT_TICKS = 100`. While waiting, agent cannot reason or perform other actions—stuck in retry loop until partner arrives or timeout.
 
-The `key` parameter in `update()` is unused in BaseMemory—kept for API consistency with SharedMemory—but memory entries are typically dicts with a `type` field for semantic filtering.
+4. **Resolution**: On success (victim no longer nearby, line 296) or timeout (line 305), rendezvous cleared via `shared_memory.update('carry_rendezvous', None)`.
 
-## Short-Term Memory with Compression
+**Key Insight**: This is cooperative blocking through shared state polling, not true async synchronization. The waiting agent burns ticks idling.
 
-`memory/short_term_memory.py` extends BaseMemory with LLM-based compression. When storage exceeds `memory_limit` (default 20 entries), `_compress_oldest()` pops the two oldest entries, sends them to Ollama for summarization, and prepends a `{type: 'old_memory_summary', entries: [...]}` entry. This keeps token usage bounded when injecting memory into prompts.
+## Per-Agent Memory: BaseMemory
 
-**Configuration**: Takes `memory_limit`, `llm_model` (default `qwen3:8b`), and `api_url` (Ollama endpoint). Exposes `get_compact_str()` for JSON serialization with minimal separators.
+**Location**: `memory/base_memory.py`
 
-## Long-Term Memory (Embedding-Based)
+Simple append-only list (`self.storage: List[Any]`) instantiated per agent in `LLMAgentBase.__init__()` (line 121). Methods:
+- `update(key, info)`: Appends `info` to list (key parameter ignored, kept for API consistency with SharedMemory)
+- `retrieve_latest()`: Returns last entry or None
+- `retrieve_all()`: Returns shallow copy of list
 
-`memory/long_term_memory.py` (imported conditionally in `memory/__init__.py` due to sklearn/litellm dependencies) stores entries as `(info, embedding)` tuples using OpenAI's `text-embedding-3-small`. Provides `retrieve_most_relevant(query, n=1)` via cosine similarity and optional LLM summarization. Not currently used by SearchRescueAgent—present for extensibility.
+**Usage**: Logs action feedback, carry failures, etc. Not currently injected into `SearchRescueAgent` prompts (legacy `RescueAgent` used it). Exists for debugging and future memory-augmented reasoning.
 
-## Global State (Pseudo-Shared Memory)
+## ShortTermMemory: LLM-Compressed History
 
-Agents also maintain `WORLD_STATE_GLOBAL` (in `agents1/modules/perception_module.py`), a dict tracking all observed victims, obstacles, doors, and teammate positions across the entire simulation. This is **agent-local** (not thread-safe across agents) and accumulates data from each tick's observations via `process_observations()`. When building LLM prompts, SearchRescueAgent merges local `WORLD_STATE` (1-block radius) with `WORLD_STATE_GLOBAL['victims']`, `obstacles`, `doors` to give the LLM a "known map" of previously seen objects.
+**Location**: `memory/short_term_memory.py`
 
-**Key Difference**: SharedMemory coordinates **inter-agent synchronization** (rendezvous), while WORLD_STATE_GLOBAL provides **intra-agent memory** of the map.
+Extends `BaseMemory` with structured dict storage and automatic LLM summarization. Configuration: `memory_limit=20`, `llm_model='qwen3:8b'`, `api_url=None` (per-agent Ollama endpoint).
+
+**Storage Constraint**: Each entry must be dict with `type` key (e.g., `'victim_found'`, `'room_explored'`). When `len(storage) >= memory_limit`, `_compress_oldest()` pops oldest 2 entries, sends to Ollama via `call_llm_sync()` (from `agents1/async_model_prompting.py`), and replaces with single `{'type': 'old_memory_summary', 'entries': [...]}` entry.
+
+**Token Optimization**: `get_compact_str()` serializes to JSON with minimal separators (`json.dumps(..., separators=(',', ':'))`) for efficient LLM prompt injection.
+
+**Current Status**: Only used by deprecated `RescueAgent` in `agents1/agents_graveyard/`. Active `SearchRescueAgent` uses `BaseMemory`. ShortTermMemory is a working prototype for bounded-memory agents.
 
 ## Thread Safety Summary
 
-- **SharedMemory**: Thread-safe via `threading.Lock` (all methods acquire lock)
-- **BaseMemory / ShortTermMemory / LongTermMemory**: Not thread-safe (single-agent ownership)
-- **WORLD_STATE_GLOBAL**: Agent-local dict, no cross-agent sharing
+- **SharedMemory**: Thread-safe via `threading.Lock` (all methods acquire lock before dict access)
+- **BaseMemory / ShortTermMemory**: Not thread-safe (single-agent ownership, no cross-thread access)
+
+## Key Files
+
+- `memory/shared_memory.py` - Lock-protected cross-agent coordination
+- `memory/base_memory.py` - Simple per-agent append-only list
+- `memory/short_term_memory.py` - LLM-compressed bounded memory
+- `agents1/llm_agent_base.py` - Rendezvous logic (lines 272-375: `_handle_rendezvous`, `_handle_carry_retry_loop`)
+- `worlds1/WorldBuilder.py` - SharedMemory instantiation (line 92)

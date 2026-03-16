@@ -1,115 +1,96 @@
-# Custom Actions & Execution
+# Actions & Execution
 
 ## Overview
 
-This system extends MATRX with cooperative multi-agent actions for search-and-rescue scenarios. Three collaborative actions enable agents (AI or human) to coordinate on tasks requiring multiple participants: carrying victims together, dropping carried objects cooperatively, and jointly removing obstacles.
+The system implements 14 custom action tools that agents can call via LLM tool calling. Actions are validated through a two-tier pipeline before execution, and cooperative actions (CarryTogether, RemoveTogether) use a retry-loop mechanism to synchronize multiple agents.
 
-## Cooperative Actions
+## Action Registration & Schema
 
-### CarryObjectTogether
+All 14 actions are defined in `agents1/tool_registry.py` as `@tool`-decorated LangChain functions. Each tool returns a `(action_name, args_dict, metadata)` tuple. The `build_tool_schemas()` function converts these to OpenAI-compatible JSON schemas for LiteLLM.
 
-Enables two agents to jointly carry heavy victims (healthy/mild severity) that cannot be carried solo. Located in `actions1/CustomActions.py`.
+**Action categories:**
+- **Movement**: MoveNorth/South/East/West (single step), MoveTo (A* navigation), NavigateToDropZone
+- **Solo carry**: CarryObject, Drop
+- **Cooperative carry**: CarryObjectTogether, DropObjectTogether (requires 2 agents adjacent)
+- **Solo obstacle**: RemoveObject (small stones, trees)
+- **Cooperative obstacle**: RemoveObjectTogether (big grey rocks, requires 2 agents)
+- **Utility**: Idle, SendMessage
 
-**Validation (is_possible)**:
-- Finds nearest partner agent via `_find_partner_agent()` (searches all SearchRescueAgent instances by proximity)
-- Returns `NOT_IN_RANGE` failure if no partner found or partner too far from target object
-- Delegates to standard `_is_possible_grab()` for inventory/movability checks
+Tool schemas define strict argument types (e.g., `MoveTo` requires `x: int, y: int`). The `GAME_RULES` constant encodes domain constraints (e.g., "Critically injured victims require CarryObjectTogether").
 
-**Execution (mutate)**:
-- Adds victim to agent's inventory temporarily
-- Removes victim from grid (not from carrier)
-- **Atomic delivery**: Immediately teleports victim to `CARRY_DROP_ZONE` (23, 8) without agent movement
-- Duration: `CARRY_TOGETHER_DURATION` ticks (10) simulates "in progress" state
-- Partner agent set to `opacity=0` (invisible) during carry to signal cooperative state
+## Action Dispatch
 
-### DropObjectTogether
+`agents1/modules/execution_module.py` (`execute_action()`) maps LLM-returned tool names + args to MATRX-ready `(action_class_name, kwargs)` pairs. Key responsibilities:
 
-Cooperative drop action that restores partner visibility and completes victim delivery. Located in `actions1/CustomActions.py`.
+- **Parameter validation**: Missing `object_id` triggers Idle fallback
+- **Partner enrichment**: Cooperative actions inject `partner_name` kwarg (not exposed to LLM) by finding nearest agent
+- **Fallback handling**: Unknown actions default to Idle(1)
 
-**Validation**:
-- Checks for invisible partner via `_find_invisible_partner()` (searches for `opacity=0` agents)
-- Blocks drop of healthy/mild victims unless cooperative carry is active (invisible partner exists)
-- Falls back to standard `_possible_drop()` validation
+## Two-Tier Validation Pipeline
 
-**Execution**:
-- Restores partner agent visibility (`opacity=1`)
-- Resets agent avatar image to default (`/images/rescue-man-final3.svg`)
-- Performs standard drop via `_act_drop()`
+Before dispatching to MATRX, `LLMAgentBase` runs two sequential checks in `_handle_llm_result()`:
 
-### RemoveObjectTogether
+### 1. World-State Validation (`_validate_action()`)
 
-Collaborative obstacle removal (stones, rocks, trees) requiring two agents. Located in `actions1/CustomActions.py`.
+Validates object-based actions (Carry*, Remove*) against current `WORLD_STATE['nearby']`:
 
-**Validation**:
-- Inherits from standard MATRX `RemoveObject`
-- Checks object exists and is in range
-- Partner validation happens during execution via `_find_partner_agent()`
+- **Missing object_id**: Returns Idle, sets `_action_feedback` with nearby objects summary
+- **Object not in range**: Checks if `object_id` exists in nearby set (1-block Chebyshev radius), fails if absent
+- **Feedback loop**: Rejection messages include agent location + nearby actionable objects (type + severity + location) for next LLM prompt
 
-**Execution**:
-- Finds nearest partner agent
-- Removes object from world if partner available
-- Returns failure if no partner in proximity
+Skips validation for movement and utility actions.
 
-## Action Mapping & Dispatch
+### 2. MATRX Feasibility Check (`_check_matrx_action()`)
 
-### ActionMapper (`agents1/action_mapper.py`)
+Calls `is_action_possible()` on the MATRX action class to verify world-state constraints:
 
-Parses LLM JSON responses into MATRX action tuples. Handles multiple JSON formats:
+- **Non-victim filter**: Rejects carry actions on non-victim objects (rocks, stones)
+- **MATRX rules**: Enforces grab_range, max_objects, inventory checks, mutual exclusivity (can't carry while already carrying)
+- **Result feedback**: Populates `_action_feedback` with MATRX error message + nearby objects
+
+Actions like Idle, movement, and message-sending skip this check.
+
+## Cooperative Action Execution
+
+### CarryObjectTogether / RemoveObjectTogether
+
+Defined in `actions1/CustomActions.py`. Both require:
+
+1. **Partner discovery**: `_find_partner_agent()` finds nearest agent in world_state by distance
+2. **Dual adjacency**: Both agents must be within `remove_range=1` of target object
+3. **is_possible()**: Checks object exists in infinite range (actual range validated in mutate())
+4. **mutate()**: Verifies both agents adjacent, executes removal/carry
+
+### Cooperative Carry Retry Loop
+
+Handled by `LLMAgentBase._handle_carry_retry()` (runs every tick):
+
+- **Trigger**: When CarryObjectTogether is requested, `_pending_carry_kwargs` is set
+- **Rendezvous**: Publishing agent writes `{agent, victim_id, location, status: 'waiting_for_partner'}` to SharedMemory
+- **Partner response**: Other agent reads rendezvous, navigates to location via `_handle_rendezvous()`
+- **Retry logic**: Re-submits CarryObjectTogether every tick for up to `CARRY_WAIT_TIMEOUT_TICKS` (default 50)
+- **Completion**: Exits when `object_id` disappears from nearby (victim carried/delivered)
+- **Timeout**: After 50 ticks, clears rendezvous, logs failure to memory, returns to reasoning
+
+During carry, one agent is set to `opacity=0` (invisible). `DropObjectTogether` uses `_find_invisible_partner()` to restore visibility.
+
+## Object Type Checking
+
+Validation logic in `_validate_action()` and `_check_matrx_action()` filters nearby objects by type:
 
 ```python
-{"action": "CarryObjectTogether", "args": {"object_id": "victim_01"}}
+actionable_types = {'victim', 'rock', 'stone', 'tree'}
 ```
 
-**Extraction strategy** (in order):
-1. Fenced code blocks: `` ```json ... ``` ``
-2. First `{...}` span via `json.loads()`
-3. Python dict literal via `ast.literal_eval()` (handles single-quoted LLM output)
+Victim severity (`'critically_injured'`, `'mildly_injured'`) is extracted from object properties and included in feedback. MATRX actions use `'injured'` substring check to distinguish victims from obstacles.
 
-Falls back to `Idle` action on parse failure.
+## Future: Capability-Based Filtering
 
-### Action Dispatch (`agents1/modules/execution_module.py`)
+The project specification mentions capability-based action filtering (not yet implemented). Would restrict tool schemas per agent (e.g., only `rescuebot0` can remove trees). Current system sends all 14 tools to every agent.
 
-Central dispatcher maps action names to MATRX-ready `(action_class_name, kwargs)` pairs. Key responsibility: **injecting partner_name** parameter.
+## Key Files
 
-**Partner injection**: Cooperative actions automatically receive `partner_name` kwarg (never exposed to LLM). Example:
-
-```python
-execute_action('CarryObjectTogether', {'object_id': 'v1'}, partner_name='humanagent')
-# Returns: ('CarryObjectTogether', {'object_id': 'v1', 'partner_name': 'humanagent'})
-```
-
-**Action categories**:
-- Movement: `MoveNorth/South/East/West`, `MoveTo`, `NavigateToDropZone`
-- Solo object manipulation: `CarryObject`, `Drop`, `RemoveObject`
-- Cooperative: `CarryObjectTogether`, `DropObjectTogether`, `RemoveObjectTogether`
-- Communication: `SendMessage`
-- Idle: `Idle` (default fallback)
-
-Missing `object_id` parameters trigger `Idle` fallback with logged warning.
-
-## State Constraints
-
-**Cooperative carry state tracking**:
-- Partner visibility (`opacity=0`) signals active cooperative carry
-- Prevents solo drop of healthy/mild victims unless cooperative state active
-- `_find_invisible_partner()` searches registered agents for `opacity=0`
-
-**Partner discovery**:
-- `_find_partner_agent()` finds nearest agent with `SearchRescueAgent` in class inheritance
-- Returns `None` if no valid partners exist
-- Distance calculated via MATRX `get_distance()` utility
-
-**Atomic delivery**: `CarryObjectTogether` bypasses standard multi-tick movement by teleporting victim directly to drop zone. This simulates extended carry duration (10 ticks) while maintaining simple state management.
-
-## Key Differences from Standard MATRX
-
-1. **Partner-aware actions**: Custom actions require coordination between agents
-2. **Atomic teleportation**: Cooperative carry delivers victims instantly vs. standard grab-move-drop flow
-3. **Visibility as state signal**: Uses `opacity=0` to track active cooperative actions
-4. **Centralized dispatch**: `execute_action()` enriches actions with internal parameters before MATRX execution
-5. **Robust LLM parsing**: Multiple JSON extraction strategies handle inconsistent LLM output formats
-
-## Configuration
-
-- `CARRY_DROP_ZONE = (23, 8)`: Hardcoded destination matching WorldBuilder drop zone
-- `CARRY_TOGETHER_DURATION = 10`: Simulated ticks for cooperative carry action
+- `agents1/tool_registry.py` - Tool definitions, schemas, game rules
+- `agents1/modules/execution_module.py` - Action dispatch, partner enrichment
+- `agents1/llm_agent_base.py` - Validation pipeline, carry retry loop
+- `actions1/CustomActions.py` - MATRX action classes (Carry*, Remove*, Drop*, Idle)

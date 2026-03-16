@@ -1,107 +1,82 @@
-# Perception & Reasoning Modules
+# Agent Decision Cycle & Tool Calling
 
 ## Overview
+Agent reasoning follows a structured tick-by-tick cycle: perceive filtered state, build TOON-compressed prompt with task/observations/memory, submit async LLM call via LiteLLM with OpenAI-compatible tool schemas, poll for result (structured tool_call or plain-text JSON), validate against WORLD_STATE, dispatch to MATRX action. Fallback parsing handles LLMs that don't support tool calling.
 
-The perception-reasoning pipeline filters raw game state into LLM-digestible observations, selects reasoning strategies, constructs per-tick prompts, and dispatches tool calls to MATRX actions. The architecture separates state compression (perception), task management (planning), action selection (reasoning), and action dispatch (execution).
+## Decision Loop Architecture
 
-## State Compression Pipeline
+**SearchRescueAgent.decide_on_actions()** (agents1/search_rescue_agent.py) orchestrates the tick-by-tick cycle:
 
-**Perception Module** (`agents1/modules/perception_module.py`)
+1. **Setup**: `_tick_setup()` updates state tracker and builds `WORLD_STATE` dict (agent location, nearby objects within 1-block Chebyshev radius, carried items)
+2. **Infrastructure preamble**: `_run_preamble()` handles carry retry loops, ongoing A* navigation, rendezvous, and LLM future polling before agent reasoning
+3. **Reasoning step**: If `_reasoning_step` flag is true and tasks remain, build prompt and submit async LLM call
+4. **Idle**: Return Idle action if infrastructure is active or no reasoning needed
 
-The `Perception` class implements two-stage state filtering:
+The system maintains persistent state across ticks: `_pending_future` (in-flight LLM call), `_nav_target` (A* destination), `_pending_carry_kwargs` (cooperative carry retry state), `_action_feedback` (validation errors for next prompt).
 
-1. **Observable radius filter** (`filter_observations` in `llm_agent_base.py`): Restricts raw MATRX state to 1-block Chebyshev radius around the agent, plus doors and teammates. Saves unfiltered state for A* pathfinding.
+## Tool Registry & Schema Generation
 
-2. **TOON format compression** (`percept_state`): Converts filtered state into token-efficient structure with three sections:
-   - `agent`: self-location and carrying status
-   - `nearby`: visible objects (victims, obstacles, doors, walls) with type classification and severity metadata
-   - `teammates`: known teammate positions
+**agents1/tool_registry.py** defines 14 LangChain `@tool`-decorated functions representing the agent's action space:
 
-The `process_observations` method maintains a **global persistent state** (`WORLD_STATE_GLOBAL`) that accumulates all objects ever seen during the episode, surviving beyond the 1-block perception radius. This global knowledge merges with local observations in the reasoning prompt.
+- Movement: `MoveNorth`, `MoveSouth`, `MoveEast`, `MoveWest`, `MoveTo`, `NavigateToDropZone`
+- Object interaction: `CarryObject`, `CarryObjectTogether`, `Drop`, `DropObjectTogether`
+- Obstacle removal: `RemoveObject`, `RemoveObjectTogether`
+- Utility: `Idle`, `SendMessage`
 
-**TOON Encoding** (`agents1/modules/utils_prompting.py`)
+Each tool returns a `(action_name, args_dict)` tuple. Game rules are embedded in docstrings (critically injured victims require CarryObjectTogether, big rocks require RemoveObjectTogether, only rescue robot can remove trees).
 
-Token-Oriented Object Notation achieves 30-60% token reduction vs JSON by using indented key-value pairs and tabular array notation. Example:
+**build_tool_schemas()** converts tools to OpenAI-compatible schemas via LangChain's `convert_to_openai_tool()`. These schemas are passed to LiteLLM's `tools` parameter during LLM calls. Reasoning strategies (cot/react/reflexion) are stored in `REASONING_STRATEGIES` dict and injected as system prompts.
 
-```
-nearby[3]{id,type,location}:
-  victim_mild_11,victim,5,8
-  rock03,rock,6,9
-  area_2,door,7,3
-```
+## Prompt Construction
 
-## Reasoning Strategies
+**ReasoningIO.get_reasoning_prompt()** (agents1/modules/reasoning_module.py) builds a 2-message list:
+- System message: Reasoning strategy prompt + game rules
+- User message: TOON-encoded dict with keys `observation`, `tasks`, `feedback`, `memory`
 
-**Strategy Selection** (`agents1/tool_registry.py`)
+**TOON compression** (agents1/modules/utils_prompting.py): `to_toon()` achieves 30-60% token reduction vs JSON by encoding dicts as indented `key: value` pairs and arrays as `key[N]: v1,v2,v3`. Uniform object arrays use tabular format with field headers.
 
-Three reasoning strategies control LLM prompt framing:
+Observations merge local filtered state with globally known objects from `WORLD_STATE_GLOBAL` (SharedMemory). Memory retrieves last 15 entries. Action feedback from previous tick's validation failures is included.
 
-- **CoT** (chain-of-thought): "Think step-by-step about your goal and current situation"
-- **ReAct**: "Thought: <reason about goal, observations, and constraints>. Then call the best action tool"
-- **Reflexion**: "Reflect on what you have done and what failed. If a previous action failed, try a completely different approach"
+## LLM Submission & Polling
 
-Selected strategy becomes the system prompt. The agent class (`SearchRescueAgent`) stores the chosen strategy in `_strategy` and passes it to the LLM call.
+**Async submission** (agents1/async_model_prompting.py): `submit_llm_call()` wraps `litellm.completion()` in a ThreadPoolExecutor (8 workers by default, resizable via `init_marble_pool()`). Each agent has a dedicated Ollama instance on port 11434+N specified via `api_base` parameter.
 
-## Per-Tick Reasoning Loop
+**Non-blocking poll**: `get_llm_result()` checks `Future.done()` without blocking. If still running, agent returns Idle and polls again next tick. On completion, returns `List[Message]` with tool_call or text content.
 
-**Reasoning Module** (`agents1/modules/reasoning_module.py`)
+Retry logic: `_retry_with_backoff()` decorator retries failed LLM calls 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s).
 
-`ReasoningIO.get_reasoning_prompt` constructs the LLM prompt from:
-- `observation`: Current percept + globally known objects from `WORLD_STATE_GLOBAL`
-- `task_decomposition`: Current subtask(s) from the planning module
-- `feedback`: Action validation failures from previous tick
-- `memory`: Last 15 entries from agent's BaseMemory (action history)
-- `previous_action`: Optional context (unused in current implementation)
+## Tool Call vs Fallback Parsing
 
-All fields are TOON-encoded for token efficiency.
+**LLMAgentBase._handle_llm_result()** (agents1/llm_agent_base.py) handles two response paths:
 
-**Prompt Flow** (`SearchRescueAgent.decide_on_actions`)
+**Path A: Structured tool_call** (preferred)
+- Extract `message.tool_calls[0].function.name` and `arguments` (JSON string or dict)
+- Validate object_id against nearby objects in WORLD_STATE via `_validate_action()`
+- Check MATRX feasibility via `is_action_possible()` in `_check_matrx_action()`
+- Dispatch to MATRX action via `execute_action()` (agents1/modules/execution_module.py), which enriches cooperative actions with `partner_name`
+- Update planner task state and memory
+- Apply A* navigation for MoveTo/NavigateToDropZone
 
-Each tick follows this sequence:
-1. **Perception**: Update `WORLD_STATE` and `WORLD_STATE_GLOBAL`
-2. **Infrastructure checks**: Carry retry, navigation, rendezvous, LLM polling (handled by `LLMAgentBase._run_preamble`)
-3. **Reasoning step**: Build prompt, submit async LLM call, return Idle
-4. **Next tick**: Poll LLM future, validate result, dispatch action
+**Path B: Plain-text JSON fallback**
+- Extract JSON from text via `ActionMapper.parse_raw()` (agents1/action_mapper.py)
+- Tries ````json ... ```` fenced blocks, then first `{ ... }` span, then Python `ast.literal_eval()` for single-quoted dicts
+- Same validation and dispatch pipeline as Path A
 
-The `_reasoning_step` flag controls whether to submit a new LLM call or poll an existing one.
+**Validation edge cases**: `_validate_action()` populates `_action_feedback` string when object_id is not in nearby objects list. Includes nearby actionable objects summary and agent location for next LLM prompt. `_check_matrx_action()` verifies MATRX physics (adjacency, carry capacity). Both validations return Idle action on failure and set `_reasoning_step = True` to retry next tick.
 
-## Tool Calling & Validation
+## Stale Observation Handling
 
-**Tool Registry** (`agents1/tool_registry.py`)
+State freshness is maintained per-tick:
+- `filter_observations()` rebuilds `WORLD_STATE` every tick before reasoning
+- A* navigation uses unfiltered `state_for_navigation` (full grid visibility)
+- SharedMemory publishes carry/obstacle events immediately after action execution via `_maybe_share_observation()`
+- Cooperative carry retry loop refreshes partner position from SharedMemory each tick
 
-Defines 14 LangChain `@tool` functions (MoveNorth, MoveTo, CarryObject, etc.) that return `(action_name, args_dict, metadata)` tuples. The `build_tool_schemas` function converts these to OpenAI-compatible tool schemas for LiteLLM.
+No explicit staleness detection—agents always reason on current tick's filtered state.
 
-**Action Dispatch** (`agents1/modules/execution_module.py`)
+## Configuration
 
-The `execute_action` function maps tool names to MATRX action classes and enriches cooperative actions with `partner_name` (hidden from LLM). Example: `CarryObjectTogether` receives the victim ID from the LLM and adds the partner agent ID at runtime.
-
-**Validation Chain** (`LLMAgentBase._handle_llm_result`)
-
-1. **Parse tool call or text fallback**: Extract action name and args from LLM response
-2. **Agent-level validation** (`_validate_action`): Check object_id against `WORLD_STATE.nearby`; populate `_action_feedback` on failure
-3. **MATRX feasibility check** (`_check_matrx_action`): Ask MATRX if action is possible before dispatch
-4. **Task advancement**: Update task graph or decrement task counter
-5. **Memory update**: Record action to BaseMemory
-6. **Navigation setup**: Convert MoveTo/NavigateToDropZone to A* waypoints
-
-Failed validations return Idle and inject feedback into the next reasoning prompt.
-
-## Planning vs. Execution Separation
-
-**Planning Module** (`agents1/modules/planning_module.py`)
-
-Two planning modes:
-- **Simple mode**: Flat list of subtasks; reasoning prompt shows last N entries
-- **DAG mode**: `TaskGraph` with conditional branching (e.g., "Check for victim. If present, carry to drop zone"). The graph advances automatically after each action; reasoning prompt shows current task + 2 upcoming for context.
-
-The planner never executes actions—it only provides task context to the reasoning module. Task advancement happens in `LLMAgentBase` after successful action dispatch.
-
-## Feedback Loop
-
-Feedback flows through three channels:
-
-1. **Action feedback** (`_action_feedback`): Validation failures injected into next reasoning prompt, then cleared
-2. **Memory** (`BaseMemory`): Action history appended to storage; last 15 entries included in every prompt
-3. **Shared memory** (`SharedMemory`): Cross-agent state (carry rendezvous, victim locations) for coordination
-
-The reasoning module includes feedback as a dedicated field in the TOON-encoded prompt, enabling the LLM to adapt strategy based on previous failures.
+- `MAX_NR_TOKENS = 8192` (agents1/llm_agent_base.py): LLM completion limit
+- `TEMPERATURE = 0.0`: Deterministic tool calls
+- `CARRY_WAIT_TIMEOUT_TICKS = 5`: Cooperative carry retry limit before abandoning
+- Tool choice: `'auto'` when tools provided, `'none'` otherwise

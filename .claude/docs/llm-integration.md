@@ -1,100 +1,60 @@
-# LLM Integration & Async Prompting
+# LLM Integration & Async Execution
 
 ## Overview
 
-This codebase uses Ollama for local LLM inference with a fully asynchronous architecture. All LLM calls run in background threads via `concurrent.futures.ThreadPoolExecutor`, allowing agents to submit prompts and continue operating while responses generate. The system supports both text generation and structured tool-calling, with fallback parsing for non-compliant responses.
+All LLM calls route through a single unified path: `litellm.completion()` in `agents1/async_model_prompting.py`. This module replaced the previous MARBLE-dependent infrastructure with a zero-dependency async execution layer using ThreadPoolExecutor and per-agent Ollama routing.
 
-## Architecture Pattern
+## Unified Completion Path
 
-**Non-blocking submission + polling**: Agents submit LLM calls and receive a `Future` immediately. Each simulation tick, they poll `future.done()` and idle until the result arrives. This prevents blocking the game loop while multiple agents reason in parallel.
+**Single entry point**: `agents1/async_model_prompting.py` provides both async (agents) and sync (planner/memory) APIs. Every LLM call uses `_llm_completion()`, which wraps `litellm.completion()` with exponential backoff retry (5 attempts, base 1s wait). LiteLLM handles Ollama/OpenAI format translation.
 
-**Thread pool sizing**: Pools auto-scale based on agent count. Formula: `max(4, num_agents * 3)` workers, allowing ~3 concurrent LLM calls per agent (reasoning + memory extraction + communication).
+**No MARBLE imports**: The consolidation removed all MARBLE framework dependencies. `_retry_with_backoff` decorator replaced MARBLE's `error_handler`, implementing the same retry logic without external deps.
 
-## Core Components
+## Per-Agent Ollama Routing
 
-### Client Pooling (engine/llm_utils.py)
+**api_base parameter**: Routes each agent to its own Ollama instance. `worlds1/WorldBuilder.py` assigns `api_base=f"http://localhost:{ollama_base_port + agent_nr}"` when creating agents. EnginePlanner uses port 11434 (base). Agent 0 uses 11434, Agent 1 uses 11435, etc. This prevents request queueing and enables true parallel inference.
 
-Thread-safe Ollama client cache (`_client_cache`) ensures one `Client` instance per host URL. The `_get_client()` function uses a lock to prevent race conditions during initialization. Clients persist across all calls to the same Ollama endpoint.
+**Parameter flow**: `WorldBuilder` → `SearchRescueAgent.__init__(api_base)` → `LLMAgentBase.__init__()` (stores as `self._api_base`) → `_submit_llm()` → `submit_llm_call(api_base=self._api_base)` → `litellm.completion(base_url=api_base)`.
 
-### Query Functions
+## Thread Pool Architecture
 
-- **`query_llm()`**: Synchronous text generation via `/api/generate` endpoint. Constructs prompts by concatenating system prompt, few-shot examples, and user prompt with custom delimiters.
-- **`query_llm_async()`**: Wraps `query_llm()` in `executor.submit()`, returns `Future` immediately.
-- **`query_llm_with_tools()`**: Structured tool-calling via Ollama SDK's `client.chat()`. Returns `{"name": str, "arguments": dict}` or falls back to plain text.
-- **`query_llm_with_tools_async()`**: Non-blocking version for tool calls.
+**Single shared pool**: `_get_executor()` lazily initializes a `ThreadPoolExecutor` with 8 workers (default) or `max(8, num_agents * 3)` if `init_marble_pool(num_agents)` is called at startup (`main.py`). All agent LLM calls share this pool. Non-blocking: agents submit calls via `submit_llm_call()` and poll via `get_llm_result(future)` each tick.
 
-### Thread Pool Management
+**EnginePlanner pool**: Separate 4-worker pool (`engine/engine_planner.py`) for task generation, summarization, prefetching, and Q&A. Prefetch strategy: while iteration N runs, tasks for iteration N+1 are generated in background, so `submit_generate_tasks()` returns instantly after the first iteration.
 
-**Engine LLM pool** (`_llm_executor` in llm_utils.py): Call `init_llm_pool(num_agents)` at startup to size the pool. Workers named `llm_worker-N`. Used by engine planner and rescue agents via the `llm_utils` module.
+## API Surface
 
-**MARBLE pool** (agents1/async_model_prompting.py): Separate executor for MARBLE-based agents. Call `init_marble_pool(num_agents)` to resize. Workers named `marble_llm-N`. Wraps MARBLE's `model_prompting()` with retry/backoff.
+**Async API** (agents): `submit_llm_call()` returns `Future` immediately. `get_llm_result(future)` returns `List[Message]` if done, `None` if in-flight. Used by `LLMAgentBase._submit_llm()` / `_poll_llm_future()`.
 
-### Request/Response Lifecycle
+**Sync API** (planner/memory): `call_llm_sync()` builds message list (system/few-shot/user), calls `_llm_completion()` blocking, returns text content. Used by `EnginePlanner` (task gen, summarization, Q&A) and `ShortTermMemory` (summarization).
 
-1. **Agent tick**: `_submit_llm(messages, tools)` calls `submit_llm_call()` → `Future` stored in `self._pending_future`
-2. **Agent returns Idle**: Agent yields control to MATRX with `_idle()` action
-3. **Next tick**: `_poll_llm_future()` checks `future.done()`
-4. **Result ready**: `get_llm_result(future)` retrieves `List[Message]` or `None`
-5. **Parse response**:
-   - Path A: Extract `tool_calls[0].function.name` and `.arguments`
-   - Path B: Fallback to `ActionMapper.parse_raw(text)` for JSON extraction
-6. **Validation**: `_validate_action()` checks object_id exists in WORLD_STATE, `_check_matrx_action()` verifies feasibility
-7. **Execution**: `execute_action()` maps to MATRX action class, agent returns `(action_name, kwargs)`
+## Retry & Error Handling
+
+**Exponential backoff**: Decorator retries failed calls 5 times with `2^attempt * base_wait_time` delays (1s, 2s, 4s, 8s, 16s). Logs warnings for transient failures, raises on final exhaustion. Handles network errors, model timeouts, malformed responses.
 
 ## Response Parsing
 
-**Structured tool calls**: LLMs trained with tool support return `tool_calls` array. Codebase extracts first call and JSON-parses `.arguments` if string.
+**Structured tool calls**: LLMs with tool support return `tool_calls` array. Code extracts first call and JSON-parses `.arguments` if string.
 
-**Text fallback** (`parse_json_response()` in llm_utils.py): Three-stage parser handles non-compliant responses:
+**Text fallback** (`parse_json_response()` in `engine/parsing_utils.py`): Three-stage parser handles non-compliant responses:
 1. Extract ` ```json ... ``` ` fenced block via regex
 2. Strict `json.loads()` for valid JSON
-3. `ast.literal_eval()` for Python dict literals (handles single-quoted strings from LLMs)
-
-If parsing fails, agent re-submits on next tick with error feedback.
-
-## Token Budget & Configuration
-
-**Default limits**: `MAX_NR_TOKENS = 3000` per agent call (agents1/llm_agent_base.py), `temperature = 0.3` for reasoning, `0.1` for tool calls.
-
-**Per-call overrides**: All query functions accept `max_tokens` and `temperature` parameters. Engine planner uses lower budgets (512 tokens) for task assignment, higher (5000) for summarization.
-
-**TOON compression** (engine/toon_utils.py): World state encoded in Token-Oriented Object Notation before prompting. Achieves 30-60% token reduction vs JSON through indented key:value syntax and inline arrays. LLMs show higher accuracy reading TOON vs JSON in benchmarks.
-
-## Few-Shot Loading
-
-**few_shot_examples.yaml**: Centralized prompt examples for reasoning, planning, memory extraction. Loaded once at import time into `_few_shot_cache`.
-
-**Usage**: `load_few_shot('reasoning')` returns `List[Dict[str, str]]` ready for injection between system and user prompts. Returns `[]` if key missing.
-
-**Format**: Each example is `{"user": "...", "assistant": "..."}` pairs converted to OpenAI message format.
-
-## Prefetch Pattern (Engine Planner)
-
-Engine planner uses background prefetching for task generation. At end of iteration N, it submits LLM call for iteration N+1 tasks while agents execute current ticks. When `generate_tasks()` is called, the prefetched `Future` is already done, eliminating wait time. This overlaps LLM latency with simulation execution.
-
-Implementation: `_prefetch_future` stores next iteration's task generation. `submit_summarize()` kicks off prefetch after summary completes.
-
-## Error Handling
-
-**Connection failures**: `requests.ConnectionError` caught and logged. Returns `None` to caller, agent re-submits next tick.
-
-**Timeouts**: 60s timeout on HTTP requests. Returns `None`, no retry at LLM utils level (agents handle retry).
-
-**Parsing failures**: Invalid JSON logs warning with first 200 chars of response. Agent receives feedback string in next prompt.
-
-**Future exceptions**: `_poll_llm_future()` wraps `future.result()` in try/except, logs exception, resets agent to reasoning state.
-
-## Key Files
-
-- **engine/llm_utils.py**: Client cache, sync/async query functions, JSON parsing, few-shot loader
-- **agents1/async_model_prompting.py**: MARBLE executor wrapper, submit/poll API
-- **agents1/llm_agent_base.py**: Agent-side LLM submission, future polling, response handling, action validation
-- **engine/toon_utils.py**: Token-efficient encoding (30-60% reduction vs JSON)
-- **few_shot_examples.yaml**: Centralized prompt examples (reasoning, planning, Q&A)
-- **engine/engine_planner.py**: Prefetch pattern for overlapping LLM calls with simulation ticks
+3. `ast.literal_eval()` for Python dict literals (single-quoted strings)
 
 ## Configuration
 
-Set `OLLAMA_BASE_URL` in llm_utils.py or pass `api_url` parameter to query functions. Default: `http://localhost:11434`.
+**Token limits**: `MAX_NR_TOKENS = 3000` per agent call (`agents1/llm_agent_base.py`), `temperature = 0.0` default. EnginePlanner uses 512 tokens for task generation, 5000 for summarization.
 
-Agent LLM model specified via `llm_model` constructor parameter (e.g., `'ollama/llama3'` for MARBLE agents, `'qwen3:8b'` for engine planner).
+**TOON compression** (`engine/toon_utils.py`): World state encoded in Token-Oriented Object Notation (30-60% reduction vs JSON) before prompting.
+
+**Few-shot loading** (`engine/parsing_utils.py`): `load_few_shot(key)` reads `few_shot_examples.yaml` (cached at import). Returns list of message dicts ready for injection between system and user prompts.
+
+## Key Files
+
+- `agents1/async_model_prompting.py` — Core module, all LLM logic
+- `engine/parsing_utils.py` — JSON extraction utilities (relocated from old `llm_utils.py`)
+- `engine/engine_planner.py` — Uses `call_llm_sync()` for planner LLM calls
+- `agents1/llm_agent_base.py` — Stores `_api_base`, calls `submit_llm_call()`
+- `worlds1/WorldBuilder.py` — Assigns per-agent `api_base` URLs
+- `memory/short_term_memory.py` — Uses `call_llm_sync()` for memory summarization
+- `main.py` — Calls `init_marble_pool(num_rescue_agents)` at startup
