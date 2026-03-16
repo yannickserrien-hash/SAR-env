@@ -1,8 +1,7 @@
 import re
-from engine.llm_utils import (
-    query_llm_async, query_llm_with_tools_async,
-    parse_json_response, load_few_shot,
-)
+from agents1.async_model_prompting import submit_llm_call as query_llm_async
+from agents1.async_model_prompting import submit_llm_call as query_llm_with_tools_async
+from engine.parsing_utils import parse_json_response, load_few_shot
 from agents1.agents_graveyard.matrx_tool_description import REASONING_TOOLS
 from memory.short_term_memory import ShortTermMemory
 

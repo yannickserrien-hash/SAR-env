@@ -15,7 +15,7 @@ import logging
 import concurrent.futures
 from typing import Dict, List, Optional
 
-from engine.llm_utils import query_llm_async
+from agents1.async_model_prompting import submit_llm_call as query_llm_async
 
 logger = logging.getLogger('PlanningModule')
 

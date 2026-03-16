@@ -107,10 +107,12 @@ class LLMAgentBase(ArtificialBrain, Perception):
         include_human: bool = True,
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
+        api_base: Optional[str] = None,
     ) -> None:
         super().__init__(slowdown, condition, name, folder)
 
         self._llm_model = llm_model
+        self._api_base = api_base
         self._include_human = include_human
         self._partner_name = name
         self.teammates: set = set()
@@ -638,6 +640,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             temperature=TEMPERATURE,
             tools=tools,
             tool_choice=tool_choice if tools else 'none',
+            api_base=self._api_base,
         )
         self._reasoning_step = False
 

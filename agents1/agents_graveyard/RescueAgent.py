@@ -30,7 +30,7 @@ from memory.short_term_memory import ShortTermMemory
 from brains1.ArtificialBrain import ArtificialBrain
 from actions1.CustomActions import Idle, CarryObject, Drop, CarryObjectTogether, DropObjectTogether
 from matrx.actions.object_actions import RemoveObject
-from engine.llm_utils import parse_json_response
+from engine.parsing_utils import parse_json_response
 
 
 class RescueAgent(PerceptionModule, ArtificialBrain):

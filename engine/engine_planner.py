@@ -22,7 +22,8 @@ from engine.toon_utils import to_toon
 import yaml
 
 from engine.iteration_data import IterationData
-from engine.llm_utils import query_llm, parse_json_response, load_few_shot
+from agents1.async_model_prompting import call_llm_sync
+from engine.parsing_utils import parse_json_response, load_few_shot
 from engine.planner_channel import PlannerChannel, PlannerMessage, PlannerResponse
 
 # Load all LLM prompts from the companion YAML file (once at import time).
@@ -64,8 +65,8 @@ class EnginePlanner:
         """
         self.max_iterations = max_iterations
         self.score_file = score_file
-        self.llm_model = llm_model
-        self._api_url = api_url
+        self.llm_model = f"ollama/{llm_model}" if not llm_model.startswith("ollama/") else llm_model
+        self._api_base = api_url
         self.ticks_per_iteration = ticks_per_iteration
         self.include_human = include_human
         self.iteration_history: List[IterationData] = []
@@ -157,12 +158,12 @@ class EnginePlanner:
             current_tasks=json.dumps(current_tasks, default=str),
         )
 
-        response = query_llm(
-            model=self.llm_model,
+        response = call_llm_sync(
+            llm_model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            api_url=self._api_url,
-            max_tokens=2000,
+            api_base=self._api_base,
+            max_token_num=2000,
             temperature=0.2,
         )
         return response or "Unable to answer at this time."
@@ -300,11 +301,11 @@ class EnginePlanner:
             ),
         )
         
-        response = query_llm(
-            model=self.llm_model,
+        response = call_llm_sync(
+            llm_model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            api_url=self._api_url,
+            api_base=self._api_base,
             few_shot_messages=load_few_shot('generate_tasks'),
         )
 
@@ -358,11 +359,11 @@ class EnginePlanner:
             score_info=score_info,
         )
 
-        response = query_llm(
-            model=self.llm_model,
+        response = call_llm_sync(
+            llm_model=self.llm_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            api_url=self._api_url,
+            api_base=self._api_base,
             few_shot_messages=load_few_shot('summarize'),
         )
 

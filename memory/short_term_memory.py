@@ -81,7 +81,8 @@ class ShortTermMemory(BaseMemory):
         })
 
     def _summarize_entries(self, memory: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        from engine.llm_utils import query_llm, parse_json_response
+        from agents1.async_model_prompting import call_llm_sync
+        from engine.parsing_utils import parse_json_response
 
         system_prompt = "You are a helpful assistant that can concisely summarize the following json format content which is listed in temporally sequential order.\n"
 
@@ -90,11 +91,12 @@ class ShortTermMemory(BaseMemory):
             f"{json.dumps(memory, default=str)}\n\n"        )
 
         try:
-            response = query_llm(
-                model=self.llm_model,
+            llm_model = f"ollama/{self.llm_model}" if not self.llm_model.startswith("ollama/") else self.llm_model
+            response = call_llm_sync(
+                llm_model=llm_model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                api_url=self._api_url,
+                api_base=self._api_url,
             )
             parsed = parse_json_response(response)
             if parsed and 'entry' in parsed:

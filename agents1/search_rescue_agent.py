@@ -48,6 +48,7 @@ class SearchRescueAgent(LLMAgentBase):
         include_human: bool = True,
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
+        api_base: Optional[str] = None,
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -58,6 +59,7 @@ class SearchRescueAgent(LLMAgentBase):
             include_human=include_human,
             shared_memory=shared_memory,
             planning_mode=planning_mode,
+            api_base=api_base,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
         self.tools_by_name, self.tool_schemas = build_tool_schemas()

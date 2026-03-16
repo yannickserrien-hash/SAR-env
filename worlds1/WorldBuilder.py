@@ -104,6 +104,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                 agents.append(brain)
                 print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
             elif agent_type == 'marble':
+                agent_api_base = f"http://localhost:{ollama_base_port + agent_nr}"
                 brain = SearchRescueAgent(
                     slowdown=8,
                     condition=condition,
@@ -114,6 +115,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     include_human=include_human,
                     shared_memory=marble_shared_memory,
                     planning_mode=planning_mode,
+                    api_base=agent_api_base,
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")

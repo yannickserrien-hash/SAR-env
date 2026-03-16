@@ -6,7 +6,7 @@ from SaR_gui import visualization_server
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from engine.engine_planner import EnginePlanner
-from engine.llm_utils import init_llm_pool
+from agents1.async_model_prompting import init_marble_pool
 
 if __name__ == "__main__":
     fld = os.getcwd()
@@ -28,7 +28,7 @@ if __name__ == "__main__":
     manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
 
     # Scale LLM thread pool for the number of agents
-    init_llm_pool(num_rescue_agents)
+    init_marble_pool(num_rescue_agents)
 
     builder, agents = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,
