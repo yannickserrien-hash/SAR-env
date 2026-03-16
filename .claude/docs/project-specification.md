@@ -2,7 +2,7 @@
 
 This document is the canonical reference for the target design of the SAR-env system. It captures all requirements, design decisions, and maps features to existing code. Use this as context when implementing changes.
 
-**Approach**: Incremental refactor of the existing MATRX/MARBLE codebase.
+**Approach**: Incremental refactor of the existing MATRX codebase (MARBLE dependency eliminated).
 
 ---
 
@@ -15,39 +15,37 @@ This is the most critical constraint in the entire system:
 - **The environment continues evolving while agents are "thinking."** The observation snapshot sent to the LLM may be stale by the time the response returns. This is a design feature, not a bug.
 - **Memory summarization, message replies, and reasoning all happen on background threads.** Nothing blocks the MATRX tick loop.
 
-### 1.1 Single LLM Path: MARBLE Executor
+### 1.1 Single LLM Path: `agents1/async_model_prompting.py`
 
-**All LLM calls must go through MARBLE's `model_prompting()`** via `agents1/async_model_prompting.py`. This is the only LLM execution path.
+**All LLM calls go through `litellm.completion()` directly** via `agents1/async_model_prompting.py`. No external framework dependencies (MARBLE, Ollama SDK, etc.). This is the only LLM execution path.
 
-- **API**: `submit_llm_call()` (non-blocking, returns `Future`) and `get_llm_result()` (polls without blocking)
+- **Async API** (for agents): `submit_llm_call()` (non-blocking, returns `Future`) and `get_llm_result()` (polls without blocking)
+- **Sync API** (for EnginePlanner, ShortTermMemory): `call_llm_sync()` — builds messages, calls litellm, returns `Optional[str]`
 - **Thread pool**: `init_marble_pool(num_agents)` — shared `ThreadPoolExecutor` sized to `max(8, num_agents * 3)`
+- **Per-agent routing**: `api_base` parameter routes each agent to its own Ollama instance (port `base + agent_nr`)
 - **Model format**: LiteLLM strings, e.g. `"ollama/qwen3:8b"`, `"ollama/llama3"`
-- **Features**: OpenAI-style tool calling, few-shot messages, retry with exponential backoff
+- **Retry**: Inlined exponential backoff decorator (5 retries, base 1s) — no MARBLE dependency
+- **Features**: OpenAI-style tool calling, few-shot messages
 
-### 1.2 LLM Consolidation Refactoring (Required)
+### 1.2 LLM Consolidation Refactoring — COMPLETED
 
-The codebase currently has a **second, legacy LLM path** in `engine/llm_utils.py` that calls Ollama directly via HTTP API and SDK. This must be eliminated — all callers migrated to the MARBLE executor.
+The legacy LLM path (`engine/llm_utils.py`) that called Ollama directly via HTTP API and SDK has been eliminated. All callers now use `agents1/async_model_prompting.py`.
 
-**Current state (two paths)**:
-| Path | File | Used By |
-|------|------|---------|
-| MARBLE executor (target) | `agents1/async_model_prompting.py` | `SearchRescueAgent` via `LLMAgentBase` |
-| Ollama direct (to remove) | `engine/llm_utils.py` | `EnginePlanner`, `ShortTermMemory`, graveyard agents |
+**What was done**:
 
-**Callers requiring migration**:
-
-| Caller | Current Usage | Migration |
-|--------|-------------|-----------|
-| `engine/engine_planner.py` (lines 160, 303, 361) | `query_llm()` from `engine/llm_utils.py` | Switch to `submit_llm_call()` / `get_llm_result()`. Already async via its own ThreadPoolExecutor — replace the underlying call. Model string changes from `"qwen3:8b"` to `"ollama/qwen3:8b"`. |
-| `memory/short_term_memory.py` (line 93) | `query_llm()` from `engine/llm_utils.py` | Switch to MARBLE `model_prompting()` or use `submit_llm_call()`. |
-| `main.py` (line 31) | `init_llm_pool()` from `engine/llm_utils.py` | Switch to `init_marble_pool()` from `agents1/async_model_prompting.py`. |
-| `agents1/agents_graveyard/*` | Various `engine/llm_utils.py` imports | Graveyard code — migrate or delete. |
-
-**Utilities to preserve** (relocate to `engine/parsing_utils.py` or similar):
-- `parse_json_response()` — 3-stage JSON/dict fallback parser. Used by `EnginePlanner` to parse LLM text responses.
-- `load_few_shot()` — Loads few-shot examples from `few_shot_examples.yaml`. Used by `EnginePlanner` prompts.
-
-**After migration**: Delete `engine/llm_utils.py` (except relocated utilities). Remove the separate Ollama thread pool (`_llm_executor`) and client cache (`_client_cache`).
+| Change | Detail |
+|--------|--------|
+| `engine/llm_utils.py` | **Deleted**. All `query_llm()`, `query_llm_async()`, `query_llm_with_tools()` removed. Ollama SDK client cache and thread pool removed. |
+| `engine/parsing_utils.py` | **Created**. `parse_json_response()` and `load_few_shot()` relocated here. |
+| `engine/engine_planner.py` | 3 `query_llm()` calls → `call_llm_sync()`. Model auto-normalized to `ollama/` prefix. `_api_url` → `_api_base`. |
+| `memory/short_term_memory.py` | 1 `query_llm()` call → `call_llm_sync()`. Model auto-normalized. |
+| `main.py` | `init_llm_pool()` → `init_marble_pool()`. |
+| `agents1/llm_agent_base.py` | Added `api_base` parameter to `__init__` and `_submit_llm()`. |
+| `agents1/search_rescue_agent.py` | Added `api_base` parameter, forwarded to super. |
+| `worlds1/WorldBuilder.py` | Each MARBLE agent gets `api_base=f"http://localhost:{ollama_base_port + agent_nr}"`. |
+| `agents1/agents_graveyard/*` | All 3 files (RescueAgent, PlanningModule, ReasoningModule) imports updated. |
+| `memory/long_term_memory.py` | **Deleted**. Unused legacy file with MARBLE imports (`model_prompting`, `text_embedding`, `BaseMemory`). |
+| `memory/__init__.py` | Removed `LongTermMemory` import. |
 
 ---
 
@@ -338,9 +336,10 @@ Configurable verbosity with 3 levels.
 
 | Feature | Existing File | Status |
 |---------|--------------|--------|
-| Async LLM execution (MARBLE) | `agents1/async_model_prompting.py` | Done — **single LLM path** for all callers |
-| LLM consolidation | `engine/llm_utils.py` | **Requires migration** — EnginePlanner, ShortTermMemory still use Ollama direct. Delete after migration. |
-| LLM utility relocation | `engine/llm_utils.py` → new location | **Pending** — `parse_json_response()` and `load_few_shot()` need relocation before deletion |
+| Async LLM execution (litellm) | `agents1/async_model_prompting.py` | **Done** — single LLM path via `litellm.completion()` directly (no MARBLE imports) |
+| LLM consolidation | `engine/llm_utils.py` (deleted) | **Done** — all callers migrated, file deleted |
+| LLM utility relocation | `engine/parsing_utils.py` | **Done** — `parse_json_response()` and `load_few_shot()` relocated |
+| Per-agent Ollama routing | `agents1/async_model_prompting.py`, `worlds1/WorldBuilder.py` | **Done** — each agent routes to `localhost:{base_port + agent_nr}` via `api_base` |
 | Agent base infrastructure | `agents1/llm_agent_base.py` | Done — needs refactoring for capabilities |
 | SearchRescueAgent | `agents1/search_rescue_agent.py` | Done — needs strategy injection |
 | EnginePlanner | `engine/engine_planner.py` | Done for Powerful mode. Partial/None modes missing |
@@ -349,7 +348,7 @@ Configurable verbosity with 3 levels.
 | Planning module | `agents1/modules/planning_module.py` | Partial (simple + dag modes) — needs strategy formalization |
 | Reasoning module | `agents1/modules/reasoning_module.py` | Partial — single implementation |
 | ShortTermMemory | `memory/short_term_memory.py` | Implemented but **NOT integrated** |
-| LongTermMemory | `memory/long_term_memory.py` | Implemented but **NOT integrated** |
+| LongTermMemory | *(deleted)* | **Deleted** — unused, had MARBLE imports. Re-implement when needed without MARBLE deps. |
 | SharedMemory | `memory/shared_memory.py` | Done |
 | BaseMemory (simple list) | `memory/base_memory.py` | Done (currently used in production) |
 | Tool registry | `agents1/tool_registry.py` | Done — needs capability-aware descriptions |
