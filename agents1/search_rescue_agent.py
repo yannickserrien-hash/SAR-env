@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple
 
 from matrx.agents.agent_utils.state import State
 
+from agents1.capabilities import filter_tools_for_capabilities, get_capability_prompt, get_game_rules
 from agents1.llm_agent_base import LLMAgentBase
 from agents1.modules.reasoning_module import ReasoningIO
 from agents1.tool_registry import REASONING_STRATEGIES, build_tool_schemas
@@ -49,6 +50,8 @@ class SearchRescueAgent(LLMAgentBase):
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
         api_base: Optional[str] = None,
+        capabilities: Optional[Dict] = None,
+        capability_knowledge: str = 'informed',
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -60,15 +63,24 @@ class SearchRescueAgent(LLMAgentBase):
             shared_memory=shared_memory,
             planning_mode=planning_mode,
             api_base=api_base,
+            capabilities=capabilities,
+            capability_knowledge=capability_knowledge,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
         self.tools_by_name, self.tool_schemas = build_tool_schemas()
+
+        # Filter tools based on capabilities
+        if self._capabilities:
+            self.tools_by_name, self.tool_schemas = filter_tools_for_capabilities(
+                self.tool_schemas, self.tools_by_name, self._capabilities
+            )
+
         self.reasoning = ReasoningIO('EMPTY')
 
         print(
             f'[SearchRescueAgent] Created '
             f'(model={llm_model}, strategy={self._strategy}, '
-            f'planning={planning_mode})'
+            f'planning={planning_mode}, caps={capabilities})'
         )
 
     # ── Main decision loop ────────────────────────────────────────────────
@@ -109,6 +121,17 @@ class SearchRescueAgent(LLMAgentBase):
                 'feedback': self._action_feedback,
                 'memory': self.memory.retrieve_all()[-15:],
             })
+
+            # Inject capability info and tailored game rules into system prompt
+            if self._capabilities and self._capability_knowledge == 'informed':
+                cap_text = get_capability_prompt(self._capabilities)
+                rules_text = get_game_rules(self._capabilities)
+                extra = f"\n\n{cap_text}\n\n{rules_text}"
+                prompt[0]['content'] = prompt[0]['content'] + extra
+            else:
+                rules_text = get_game_rules()
+                prompt[0]['content'] = prompt[0]['content'] + f"\n\n{rules_text}"
+
             print(f'[{self.agent_id}] Submitting LLM call')
             self._submit_llm(prompt, tools=self.tool_schemas)
 

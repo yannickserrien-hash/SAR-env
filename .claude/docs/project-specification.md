@@ -71,7 +71,7 @@ Each agent is created with a set of capabilities. **The environment enforces res
 | Capability | Values | Effect |
 |-----------|--------|--------|
 | **Vision** | 1 (low), 2 (medium), 3 (high) | Number of blocks around the agent that are visible. Baseline is 1. Maps to MATRX `SenseCapability` ranges. |
-| **Strength** | low, medium, high | **Low**: cannot carry victims, can only report them. Cannot remove rocks/stones — only trees. **Medium**: can carry mildly injured alone. Can remove stones. **High**: can carry mildly injured alone, remove stones and rocks solo. |
+| **Strength** | low, medium, high | **Low**: can only remove trees solo. Cannot remove rocks or stones solo. **Medium**: can remove trees and stones solo. **High**: can remove trees, stones, and rocks solo. |
 | **Medical** | low, high | **High**: can carry critically injured victims alone. **Low**: can only carry mildly injured alone; critically injured require cooperative carry (`CarryTogether`). |
 | **Speed** | slow, normal, fast | **Slow**: adds delay ticks to move actions. **Normal**: standard 1-tick movement. **Fast**: no delay (potential future: move 2 blocks per tick). |
 
@@ -93,12 +93,21 @@ A runtime parameter controls whether agents know their own capabilities:
 
 Presets are configured at agent creation time in `main.py` or a config file. Custom capability combinations are also supported.
 
-### 3.4 Existing Code to Extend
+### 3.4 Implementation — COMPLETED
 
-- `worlds1/WorldBuilder.py` → `add_agents()`: Pass capability dict per agent
-- `matrx/agents/capabilities/capability.py` → `SenseCapability`: Already supports variable vision ranges
-- `brains1/ArtificialBrain.py`: Hardcoded `grab_range=1`, action durations — make these capability-dependent
-- `actions1/CustomActions.py`: Add capability checks to `is_possible()` methods
+| Feature | Status | Code |
+|---------|--------|------|
+| Capability presets & resolver | Done | `agents1/capabilities.py` — `CAPABILITY_PRESETS`, `resolve_capabilities()` |
+| Per-agent vision range | Done | `worlds1/WorldBuilder.py` — per-agent `SenseCapability` from `caps['vision']` |
+| Capability-aware prompts | Done | `agents1/capabilities.py` — `get_capability_prompt()`, `get_game_rules(caps)` |
+| Tool filtering by capabilities | Done | `agents1/capabilities.py` — `filter_tools_for_capabilities()` |
+| Medical enforcement (CarryObject) | Done | `actions1/CustomActions.py` — `CarryObject.is_possible()` checks medical level |
+| Joint actions bypass capabilities | Done | `CarryObjectTogether` and `RemoveObjectTogether` have no capability checks — always succeed if object exists, in range, and partner present |
+| Strength enforcement (RemoveObject solo) | Done | `brains1/ArtificialBrain.py` — `decide_on_action()` blocks stones/rocks for low/medium strength |
+| Speed delays | Done | `brains1/ArtificialBrain.py` — `decide_on_action()` adds `action_duration=3` for slow agents on move actions |
+| Agent layer integration | Done | `agents1/llm_agent_base.py` + `search_rescue_agent.py` — accept capabilities, filter tools, inject prompts |
+| Action validators cleaned up | Done | `agents1/llm_agent_base.py` — removed `'injured' not in` hack and `CarryObjectTogether` skip, let `is_possible()` enforce |
+| Config in main.py | Done | `main.py` — `agent_presets`, `capability_knowledge` config variables |
 
 ---
 

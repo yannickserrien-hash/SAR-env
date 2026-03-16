@@ -13,6 +13,14 @@ CARRY_DROP_ZONE: Tuple[int, int] = (23, 8)
 CARRY_TOGETHER_DURATION: int = 10
 
 
+def _get_agent_capabilities(grid_world, agent_id):
+    """Get capability dict from agent properties. Returns defaults if not set."""
+    agent_body = grid_world.registered_agents[agent_id]
+    return agent_body.properties.get('capabilities', {
+        'vision': 2, 'strength': 'medium', 'medical': 'low', 'speed': 'normal'
+    })
+
+
 def _find_partner_agent(world_state, agent_id):
     """Find the nearest other agent (AI or human) for cooperative actions.
 
@@ -354,13 +362,24 @@ class CarryObject(Action):
         object_id = None if 'object_id' not in kwargs else kwargs['object_id']
         grab_range = np.inf if 'grab_range' not in kwargs else kwargs['grab_range']
         max_objects = np.inf if 'max_objects' not in kwargs else kwargs['max_objects']
+
+        # Obstacles cannot be carried
+        if object_id and ('stone' in object_id or 'rock' in object_id or 'tree' in object_id):
+            return GrabObjectResult(GrabObjectResult.RESULT_OBJECT_UNMOVABLE, False)
+
+        # Capability enforcement: medical controls solo carrying
+        caps = _get_agent_capabilities(grid_world, agent_id)
+        medical = caps.get('medical', 'low')
+
         if object_id and 'critical' in object_id:
-            return GrabObjectResult(GrabObjectResult.RESULT_OBJECT_UNMOVABLE, False)
-        if object_id and 'stone' in object_id or object_id and 'rock' in object_id or object_id and 'tree' in object_id:
-            return GrabObjectResult(GrabObjectResult.RESULT_OBJECT_UNMOVABLE, False)
-        else:
-            return _is_possible_grab(grid_world, agent_id=agent_id, object_id=object_id, grab_range=grab_range,
-                                    max_objects=max_objects) 
+            if medical != 'high':
+                return GrabObjectResult(
+                    "Critically injured victims require high medical skill or "
+                    "cooperative carry (CarryObjectTogether).", False
+                )
+
+        return _is_possible_grab(grid_world, agent_id=agent_id, object_id=object_id, grab_range=grab_range,
+                                max_objects=max_objects)
 
     def mutate(self, grid_world, agent_id, world_state, **kwargs):
         """ Grabs an object.

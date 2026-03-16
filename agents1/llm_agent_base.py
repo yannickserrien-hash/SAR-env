@@ -92,7 +92,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
     _SKIP_MATRX_CHECK = frozenset({
         'Idle', 'MoveTo', 'NavigateToDropZone',
         'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest', 'SendMessage',
-        _CarryObjectTogether.__name__,   # managed by the carry retry loop
     })
 
     # ── Constructor ───────────────────────────────────────────────────────
@@ -108,6 +107,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
         api_base: Optional[str] = None,
+        capabilities: Optional[Dict] = None,
+        capability_knowledge: str = 'informed',
     ) -> None:
         super().__init__(slowdown, condition, name, folder)
 
@@ -116,6 +117,10 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._include_human = include_human
         self._partner_name = name
         self.teammates: set = set()
+
+        # ── Capabilities ──────────────────────────────────────────────────
+        self._capabilities = capabilities
+        self._capability_knowledge = capability_knowledge
 
         # ── Memory ─────────────────────────────────────────────────────────
         self.memory = BaseMemory()
@@ -558,13 +563,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         check_kwargs = dict(kwargs)
         check_kwargs.setdefault('grab_range', 1)
         check_kwargs.setdefault('max_objects', 1)
-
-        if 'injured' not in kwargs.get('object_id', ''):
-            print(
-                f"[{self.agent_id}] MATRX rejected {action_name} for "
-                f"non-victim object '{kwargs.get('object_id', '')}'"
-            )
-            return self._idle()
 
         succeeded, action_result = self.is_action_possible(action_name, check_kwargs)
         if succeeded:

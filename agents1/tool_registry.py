@@ -40,6 +40,8 @@ REASONING_STRATEGIES: Dict[str, str] = {
     ),
 }
 
+# Static fallback game rules (used when capabilities module is not available).
+# For capability-aware rules, use agents1.capabilities.get_game_rules(caps).
 GAME_RULES = (
     "Rules:\n"
     "- Critically injured victims require CarryObjectTogether (both agents).\n"

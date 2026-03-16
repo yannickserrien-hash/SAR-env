@@ -629,20 +629,40 @@ class ArtificialBrain(ArtificialAgentBrain, ABC):
     def decide_on_action(self, state:State):
         '''
         Agents must override decide_on_actions instead. Define obstacle removal durations.
+        Enforces speed delays and strength-based RemoveObject restrictions.
         '''
         act,params = self.decide_on_actions(state)
         params['grab_range']=1
         params['max_objects']=1
 
+        # Get agent capabilities (if set)
+        caps = self.agent_properties.get('capabilities', {})
+        strength = caps.get('strength', 'medium')
+        speed = caps.get('speed', 'normal')
+
+        # Strength enforcement for solo RemoveObject
+        if act == 'RemoveObject' and params.get('object_id'):
+            obj_id = params['object_id']
+            if strength == 'low' and ('stone' in obj_id or 'rock' in obj_id):
+                print(f"[{self.agent_id}] Strength too low to remove '{obj_id}'")
+                return 'Idle', {'duration_in_ticks': 1}
+            if strength == 'medium' and 'rock' in obj_id:
+                print(f"[{self.agent_id}] Strength too low to remove rock '{obj_id}' solo")
+                return 'Idle', {'duration_in_ticks': 1}
+
         # define duration to remove stone object by agent only
-        if act == 'RemoveObject' and 'stone' in params['object_id']:
+        if act == 'RemoveObject' and params.get('object_id') and 'stone' in params['object_id']:
             params['action_duration'] = 200
         # define duration to remove tree object by agent only
-        if act == 'RemoveObject' and 'tree' in params['object_id']:
+        if act == 'RemoveObject' and params.get('object_id') and 'tree' in params['object_id']:
             params['action_duration'] = 100
         # define duration to pick up a mildly injured victim by agent
-        if act == 'CarryObject' and 'mild' in params['object_id']:
+        if act == 'CarryObject' and params.get('object_id') and 'mild' in params['object_id']:
             params['action_duration'] = 150
+
+        # Speed delay for move actions
+        if speed == 'slow' and act in ('MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest'):
+            params['action_duration'] = 3
 
         return act,params
     

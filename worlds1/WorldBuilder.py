@@ -17,6 +17,7 @@ from matrx.world_builder import RandomProperty
 from matrx.goals import WorldGoal
 from agents1.agents_graveyard.RescueAgent import RescueAgent
 from agents1.search_rescue_agent import SearchRescueAgent
+from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
 from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
@@ -67,7 +68,8 @@ _AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 # Add the agents to the world
 def add_agents(builder, condition, name, folder, agent_type='baseline',
                num_rescue_agents=1, include_human=True, ollama_base_port=11434,
-               planning_mode='simple'):
+               planning_mode='simple', agent_presets=None,
+               capability_knowledge='informed'):
     """
     Add agents to the world.
 
@@ -81,9 +83,17 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         include_human: Whether to add a keyboard-controlled human agent
         ollama_base_port: Base port for Ollama instances (agent N uses base_port + N)
         planning_mode: Planning strategy for MARBLE agents ('simple' or 'dag')
+        agent_presets: List of preset names or capability dicts, one per agent.
+                       Defaults to all 'generalist'.
+        capability_knowledge: 'informed' (agents know capabilities) or 'discovery'
+                              (agents learn from failures).
     """
-    # Define the agent's sense capabilities
-    sense_capability_agent = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
+    if agent_presets is None:
+        agent_presets = [DEFAULT_PRESET] * num_rescue_agents
+    # Extend or truncate to match num_rescue_agents
+    while len(agent_presets) < num_rescue_agents:
+        agent_presets.append(agent_presets[-1] if agent_presets else DEFAULT_PRESET)
+
     # Define the human's sense capabilities based on the selected condition
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
 
@@ -96,6 +106,16 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         # Add the artificial agents based on condition and agent_type
         for agent_nr in range(num_rescue_agents):
             agent_name = f"RescueBot{agent_nr}"
+            caps = resolve_capabilities(agent_presets[agent_nr])
+
+            # Per-agent SenseCapability with vision from capabilities
+            sense_capability_agent = SenseCapability({
+                AgentBody: agent_sense_range,
+                CollectableBlock: caps['vision'],
+                None: other_sense_range,
+                ObstacleObject: caps['vision'],
+            })
+
             if agent_type == 'llm':
                 brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
                                     llm_model='qwen2.5:3b', include_human=include_human,
@@ -116,14 +136,18 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     shared_memory=marble_shared_memory,
                     planning_mode=planning_mode,
                     api_base=agent_api_base,
+                    capabilities=caps,
+                    capability_knowledge=capability_knowledge,
                 )
                 agents.append(brain)
-                print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")
+                print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
 
             loc = _AGENT_START_POSITIONS[agent_nr % len(_AGENT_START_POSITIONS)]
             builder.add_agent(loc, brain, team=team_name, name=agent_name,
                               customizable_properties=['score', 'thinking_state'],
                               score=0, thinking_state='idle',
+                              capabilities=caps,
+                              capability_knowledge=capability_knowledge,
                               sense_capability=sense_capability_agent,
                               is_traversable=True, img_name="/images/robot-final4.svg")
 
@@ -226,7 +250,8 @@ def add_water(builder):
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
                    num_rescue_agents=1, include_human=True, ollama_base_port=11434,
-                   planning_mode='simple'):
+                   planning_mode='simple', agent_presets=None,
+                   capability_knowledge='informed'):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -291,7 +316,9 @@ def create_builder(condition, name, folder, agent_type='baseline',
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
                         ollama_base_port=ollama_base_port,
-                        planning_mode=planning_mode)
+                        planning_mode=planning_mode,
+                        agent_presets=agent_presets,
+                        capability_knowledge=capability_knowledge)
     add_victims(builder)
     # add_obstacles(builder)
     add_decorative_objects(builder)
