@@ -27,13 +27,26 @@
 iterations:
   # --- Iteration 1 ---
   - rescuebot0:
-      task: "Explore area 1 and rescue any victims found"
+      task: "Find what the other agent does not know"
       plan: |
-        1. Move to area_1 door at [3, 4]
-        2. MoveNorth
-        3. Carry victim if it is in the nearby cells
-        4. Navigate to Drop Zone
-        5. Drop the victim at the drop zone
+        1. Go to Area 1.
+        2. Enter Area 1.
+
+    rescuebot1:
+      task: "Find what the other agent does not know"
+      plan: |
+        1. Go to Area 2.
+        2. Enter Area 2.
+
+
+  - rescuebot0:
+    task: "Explore area 1 and rescue any victims found"
+    plan: |
+      1. Move to area_1 door at [3, 4]
+      2. MoveNorth
+      3. Carry victim if it is in the nearby cells
+      4. Navigate to Drop Zone
+      5. Drop the victim at the drop zone
 
     rescuebot1:
       task: "Explore area 2 and rescue any victims found"

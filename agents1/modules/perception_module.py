@@ -29,7 +29,7 @@ class Perception:
 
         result = {
             "agent": self._serialize_agent(state, agent_id),
-            "nearby": self._serialize_nearby(state, agent_id, teammate_ids),
+            "current_observation": self._serialize_nearby(state, agent_id, teammate_ids),
             # Use flat scalar fields so TOON's tabular format renders cleanly:
             #   teammates[1]{id,x,y}:
             #     rescuebot1,21,11
@@ -68,6 +68,7 @@ class Perception:
         """Extract all interesting nearby objects."""
         skip = {agent_id, 'World'}
         objects: List[Dict[str, Any]] = []
+        walls = {"blocked": []}
 
         for obj_id, obj_data in state.items():
             if obj_id in skip:
@@ -83,11 +84,12 @@ class Perception:
                 continue
 
             if obj_type == 'door':
-                obj_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
+                continue
+            #     obj_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
 
-            if obj_type == 'wall':
-                obj_id = str(obj_id).split('_-_wall')[0] if '_-_wall' in str(obj_id) else str(obj_id)
-                obj_id += '_wall'
+            if 'wall' in obj_type:
+                walls['blocked'].append([int(c) for c in loc])
+                continue
 
             entry: Dict[str, Any] = {
                 "id": obj_id,
@@ -108,6 +110,7 @@ class Perception:
                     entry["severity"] = "healthy"
 
             objects.append(entry)
+        objects.append(walls)
 
         return objects
 
@@ -165,11 +168,9 @@ class Perception:
         self.WORLD_STATE_GLOBAL: Dict[str, Any] = {
             'victims':   [],   # [{'id', 'severity', 'location'}]
             'obstacles': [],   # [{'id', 'type', 'location'}]
-            'doors':     [],   # [{'area', 'location'}]
-            'teammate_positions': {},  # {agent_id: [x, y]}
         }
 
-    def process_observations(self, state) -> Dict[str, Any]:
+    def update_observation(self, state) -> Dict[str, Any]:
         """Update and return the persistent global world state.
 
         Call every tick with the filtered state so that objects seen
@@ -194,21 +195,21 @@ class Perception:
         teammate_ids: set = set()
 
         # --- Teammate positions ---
-        if include_human and partner_name:
-            human_info = state.get(partner_name)
-            if isinstance(human_info, dict):
-                hloc = human_info.get('location')
-                if hloc is not None:
-                    self.WORLD_STATE_GLOBAL['teammate_positions'][partner_name] = [int(c) for c in hloc]
-                    teammate_ids.add(partner_name)
+        # if include_human and partner_name:
+        #     human_info = state.get(partner_name)
+        #     if isinstance(human_info, dict):
+        #         hloc = human_info.get('location')
+        #         if hloc is not None:
+        #             self.WORLD_STATE_GLOBAL['teammate_positions'][partner_name] = [int(c) for c in hloc]
+        #             teammate_ids.add(partner_name)
 
-        for obj_id, obj_data in state.items():
-            if isinstance(obj_id, str) and obj_id.startswith('rescuebot') and obj_id != self.agent_id:
-                if isinstance(obj_data, dict):
-                    tloc = obj_data.get('location')
-                    if tloc is not None:
-                        self.WORLD_STATE_GLOBAL['teammate_positions'][obj_id] = [int(c) for c in tloc]
-                        teammate_ids.add(obj_id)
+        # for obj_id, obj_data in state.items():
+        #     if isinstance(obj_id, str) and obj_id.startswith('rescuebot') and obj_id != self.agent_id:
+        #         if isinstance(obj_data, dict):
+        #             tloc = obj_data.get('location')
+        #             if tloc is not None:
+        #                 self.WORLD_STATE_GLOBAL['teammate_positions'][obj_id] = [int(c) for c in tloc]
+        #                 teammate_ids.add(obj_id)
 
         # --- Nearby objects ---
         skip_ids = {self.agent_id, 'World'} | teammate_ids
@@ -258,12 +259,12 @@ class Perception:
                     existing['location'] = pos
 
             # --- Doors ---
-            elif typ == 'door':
-                area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
-                existing = next((d for d in self.WORLD_STATE_GLOBAL['doors'] if d['area'] == area_id), None)
-                if existing is None:
-                    self.WORLD_STATE_GLOBAL['doors'].append(
-                        {'area': area_id, 'location': pos}
-                    )
-                else:
-                    existing['location'] = pos
+            # elif typ == 'door':
+            #     area_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
+            #     existing = next((d for d in self.WORLD_STATE_GLOBAL['doors'] if d['area'] == area_id), None)
+            #     if existing is None:
+            #         self.WORLD_STATE_GLOBAL['doors'].append(
+            #             {'area': area_id, 'location': pos}
+            #         )
+            #     else:
+            #         existing['location'] = pos

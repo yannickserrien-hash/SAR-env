@@ -8,13 +8,18 @@ from agents1.modules.utils_prompting import to_toon
 
 logger = logging.getLogger('Planning')
 
-
 TASK_DECOMPOSITION_PROMPT = """
 You are an expert planner for a team of agents in a search and rescue simulation.
 Your job is to decompose high-level tasks into actionable subgoals for the agents.
 """
 
-# ── TaskGraph data structures ─────────────────────────────────────────────────
+_STOP_WORDS = frozenset({
+    'the', 'a', 'an', 'to', 'at', 'for', 'and', 'or', 'is', 'in', 'of',
+    'it', 'its', 'this', 'that', 'be', 'by', 'on', 'with', 'from',
+})
+
+
+# ── Task status ──────────────────────────────────────────────────────────────
 
 
 class TaskStatus(Enum):
@@ -22,6 +27,21 @@ class TaskStatus(Enum):
     ACTIVE = 'active'
     COMPLETED = 'completed'
     SKIPPED = 'skipped'
+
+
+# ── SubTask (simple mode) ────────────────────────────────────────────────────
+
+
+@dataclass
+class SubTask:
+    description: str
+    status: TaskStatus = TaskStatus.PENDING
+
+    def __str__(self) -> str:
+        return self.description
+
+
+# ── TaskGraph data structures (DAG mode) ─────────────────────────────────────
 
 
 @dataclass
@@ -35,19 +55,13 @@ class TaskNode:
     next_id: Optional[int] = None
 
     def full_description(self) -> str:
-        """Description including the conditional action (for LLM prompts)."""
         if self.is_condition and self.condition_action:
             return f"{self.description}. If so, {self.condition_action}"
         return self.description
 
 
-# Regex patterns for detecting conditional tasks
-_COND_INLINE = re.compile(
-    r'^(.*?)\.\s*[Ii]f\s+(.+?),\s*(.+)$'
-)
-_COND_SUBBULLET = re.compile(
-    r'\n\s*-\s*[Ii]f\s+(.+?),\s*(.+)$'
-)
+_COND_INLINE = re.compile(r'^(.*?)\.\s*[Ii]f\s+(.+?),\s*(.+)$')
+_COND_SUBBULLET = re.compile(r'\n\s*-\s*[Ii]f\s+(.+?),\s*(.+)$')
 
 
 class TaskGraph:
@@ -59,11 +73,6 @@ class TaskGraph:
 
     @classmethod
     def from_task_list(cls, tasks: List[str]) -> 'TaskGraph':
-        """Build a TaskGraph from a flat list of task description strings.
-
-        Detects conditional patterns (e.g. "Check for X. If present, Y")
-        and marks those nodes as condition nodes with a condition_action.
-        """
         graph = cls()
         if not tasks:
             return graph
@@ -71,45 +80,27 @@ class TaskGraph:
         nodes: List[TaskNode] = []
         for idx, raw in enumerate(tasks):
             node_id = idx + 1
-            # Try sub-bullet conditional first (multiline)
             m = _COND_SUBBULLET.search(raw)
             if m:
-                # Parent description is everything before the sub-bullet
                 desc = raw[:m.start()].strip().rstrip('.')
-                action = m.group(2).strip()
                 nodes.append(TaskNode(
-                    id=node_id,
-                    description=desc,
-                    is_condition=True,
-                    condition_action=action,
+                    id=node_id, description=desc,
+                    is_condition=True, condition_action=m.group(2).strip(),
                 ))
                 continue
-
-            # Try inline conditional
             m = _COND_INLINE.match(raw.strip())
             if m:
-                desc = m.group(1).strip()
-                action = m.group(3).strip()
                 nodes.append(TaskNode(
-                    id=node_id,
-                    description=desc,
-                    is_condition=True,
-                    condition_action=action,
+                    id=node_id, description=m.group(1).strip(),
+                    is_condition=True, condition_action=m.group(3).strip(),
                 ))
                 continue
-
-            # Normal task
             nodes.append(TaskNode(id=node_id, description=raw.strip()))
 
-        # Link nodes sequentially
         for i in range(len(nodes) - 1):
             nodes[i].next_id = nodes[i + 1].id
-
-        # Populate graph
         for node in nodes:
             graph._nodes[node.id] = node
-
-        # Activate the first node
         if nodes:
             graph._head_id = nodes[0].id
             nodes[0].status = TaskStatus.ACTIVE
@@ -121,58 +112,23 @@ class TaskGraph:
             return None
         return self._nodes.get(self._head_id)
 
-    def advance(self, action_name: str) -> None:
-        """Mark the current task as completed, remove it, and advance to next.
-
-        For condition nodes the graph always advances.  The LLM decides
-        whether to perform the conditional action (any action != Idle) or
-        skip it (Idle).  The graph does not need to branch — the branching
-        is implicit in the LLM's action choice.
-        """
+    def advance(self) -> None:
+        """Mark current task completed, remove it, activate next."""
         node = self._nodes.get(self._head_id)
         if node is None:
             return
-
         node.status = TaskStatus.COMPLETED
         next_id = node.next_id
-
-        # Remove completed node
         del self._nodes[node.id]
-
-        # Advance head
         self._head_id = next_id
         if next_id is not None and next_id in self._nodes:
             self._nodes[next_id].status = TaskStatus.ACTIVE
         else:
             self._head_id = None
-
-        logger.info("Task completed: '%s' | next: %s", node.description, next_id)
+        logger.info("DAG task completed: '%s' | next: %s", node.description, next_id)
 
     def is_empty(self) -> bool:
         return len(self._nodes) == 0
-
-    def remaining_count(self) -> int:
-        return len(self._nodes)
-
-    def get_tasks_for_prompt(self) -> List[str]:
-        """Return the current task + up to 2 upcoming tasks for LLM context."""
-        result: List[str] = []
-        current = self.get_current_task()
-        if current is None:
-            return result
-
-        result.append(current.full_description())
-
-        # Walk the chain for upcoming context
-        nid = current.next_id
-        for _ in range(2):
-            if nid is None or nid not in self._nodes:
-                break
-            upcoming = self._nodes[nid]
-            result.append(upcoming.full_description())
-            nid = upcoming.next_id
-
-        return result
 
     def __repr__(self) -> str:
         parts = []
@@ -183,25 +139,33 @@ class TaskGraph:
         return "TaskGraph:\n" + "\n".join(parts) if parts else "TaskGraph: (empty)"
 
 
-# ── Planning class ────────────────────────────────────────────────────────────
+# ── Keyword-overlap matching ─────────────────────────────────────────────────
+
+
+def _is_task_match(task_completing: str, task_description: str) -> bool:
+    """Check if task_completing keywords overlap >=50% with task description."""
+    tc_words = set(task_completing.lower().split()) - _STOP_WORDS
+    td_words = set(task_description.lower().split()) - _STOP_WORDS
+    if not tc_words:
+        return False
+    return len(tc_words & td_words) / len(tc_words) >= 0.5
+
+
+# ── Planning class ───────────────────────────────────────────────────────────
 
 
 class Planning:
     def __init__(self, mode: str = 'simple') -> None:
-        self.mode = mode  # 'simple' or 'dag'
-
-        # Task decomposition (used by both modes)
-        self.task_decomposition: List[str] = []
-
-        # DAG mode only
+        self.mode = mode
+        self.task_decomposition: List[SubTask] = []
         self.task_graph: Optional[TaskGraph] = None
+        self.current_task = ''
 
         # Clarification state (AskPlanner discussion loop)
         self._needs_clarification: bool = False
         self._question: str = ''
-        self._feedback: str = ''           # accumulated Q&A from prior rounds
+        self._feedback: str = ''
         self._clarification_round: int = 0
-        self.current_task = ''
 
     def update_current_task(self, task: str) -> None:
         self.current_task = task
@@ -210,37 +174,67 @@ class Planning:
         self.task_decomposition = decomposition
 
     def set_manual_task_decomposition(self, decomposition: List[str]) -> None:
-        """Override PlanningModule by directly setting the plan text.
-
-        Must be called after set_current_task() (which resets self.task_decomposition).
-        """
-        self.task_decomposition = decomposition
+        """Set plan from a list of task description strings."""
+        self.task_decomposition = [SubTask(desc) for desc in decomposition]
+        if self.task_decomposition:
+            self.task_decomposition[0].status = TaskStatus.ACTIVE
         if self.mode == 'dag':
             self.task_graph = TaskGraph.from_task_list(decomposition)
 
-    # ── Unified interface (works for both modes) ──────────────────────────
+    # ── Unified interface ────────────────────────────────────────────────
 
     def has_remaining_tasks(self) -> bool:
         if self.mode == 'dag':
             return self.task_graph is not None and not self.task_graph.is_empty()
-        return len(self.task_decomposition) > 0
+        return any(
+            st.status in (TaskStatus.PENDING, TaskStatus.ACTIVE)
+            for st in self.task_decomposition
+        )
 
-    def get_tasks_for_reasoning(self, task_num: int) -> List[str]:
-        """Return tasks for the reasoning prompt.
-
-        In 'dag' mode: returns the current task + up to 2 upcoming.
-        In 'simple' mode: returns the last *task_num* entries (existing behavior).
-        """
+    def get_tasks_for_reasoning(self) -> List[str]:
+        """Return ONLY the currently active task."""
         if self.mode == 'dag':
-            return self.task_graph.get_tasks_for_prompt() if self.task_graph else []
-        return self.task_decomposition[-task_num:] if task_num > 0 else []
+            node = self.task_graph.get_current_task() if self.task_graph else None
+            return [node.full_description()] if node else []
+        for st in self.task_decomposition:
+            if st.status == TaskStatus.ACTIVE:
+                return [st.description]
+        return []
 
-    def advance_task(self, action_name: str) -> None:
-        """Advance the task graph. No-op in simple mode."""
-        if self.mode == 'dag' and self.task_graph:
-            self.task_graph.advance(action_name)
+    def advance_task(self, task_completing: str = '') -> None:
+        """Advance the active task if task_completing matches it."""
+        if not task_completing:
+            return
+        if self.mode == 'dag':
+            self._advance_dag(task_completing)
+        else:
+            self._advance_simple(task_completing)
 
-    # ── Prompt generation ─────────────────────────────────────────────────
+    def _advance_simple(self, task_completing: str) -> None:
+        active = next(
+            (st for st in self.task_decomposition if st.status == TaskStatus.ACTIVE),
+            None,
+        )
+        if active is None:
+            return
+        if _is_task_match(task_completing, active.description):
+            active.status = TaskStatus.COMPLETED
+            for st in self.task_decomposition:
+                if st.status == TaskStatus.PENDING:
+                    st.status = TaskStatus.ACTIVE
+                    break
+            logger.info("Task completed: '%s' (matched '%s')", active.description, task_completing)
+
+    def _advance_dag(self, task_completing: str) -> None:
+        if not self.task_graph:
+            return
+        node = self.task_graph.get_current_task()
+        if node is None:
+            return
+        if _is_task_match(task_completing, node.description):
+            self.task_graph.advance()
+
+    # ── Prompt generation ────────────────────────────────────────────────
 
     def get_task_decomposition_prompt(
         self, information: Dict[str, Any]

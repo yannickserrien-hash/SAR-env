@@ -48,6 +48,8 @@ class SearchRescueAgent(LLMAgentBase):
         include_human: bool = True,
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
+        api_base: Optional[str] = None,
+        comm_strategy: str = 'priority',
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -58,21 +60,23 @@ class SearchRescueAgent(LLMAgentBase):
             include_human=include_human,
             shared_memory=shared_memory,
             planning_mode=planning_mode,
+            api_base=api_base,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
+        self._comm_strategy = comm_strategy
         self.tools_by_name, self.tool_schemas = build_tool_schemas()
         self.reasoning = ReasoningIO('EMPTY')
 
         print(
             f'[SearchRescueAgent] Created '
             f'(model={llm_model}, strategy={self._strategy}, '
-            f'planning={planning_mode})'
+            f'planning={planning_mode}, comm={comm_strategy})'
         )
 
     # ── Main decision loop ────────────────────────────────────────────────
 
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
-        self._tick_setup(filtered_state)
+        self.process_observations(filtered_state)
 
         if not self._current_task:
             return self._idle()
@@ -95,23 +99,23 @@ class SearchRescueAgent(LLMAgentBase):
             # Merge local observation with globally known objects
             observation = dict(self.WORLD_STATE)
             global_state = self.WORLD_STATE_GLOBAL
-            if any(global_state.get(k) for k in ('victims', 'obstacles', 'doors')):
-                observation['known'] = {
-                    k: v for k, v in global_state.items()
-                    if k != 'teammate_positions' and v
-                }
+
+            # Parse new messages and build communication context
+            self._msg_handler.parse_new_messages(self.received_messages)
+            comm_context = self._msg_handler.get_context_for_prompt()
 
             prompt = self.reasoning.get_reasoning_prompt({
-                'task_decomposition': self.planner.get_tasks_for_reasoning(self.task_num),
+                'task_decomposition': self.planner.get_tasks_for_reasoning(),
                 'observation': observation,
-                'feedback': self._action_feedback,
+                'all_observations': global_state,
                 'memory': self.memory.retrieve_all()[-15:],
+                'communication': comm_context,
             })
             print(f'[{self.agent_id}] Submitting LLM call')
+
             self._submit_llm(prompt, tools=self.tool_schemas)
 
             if self.planner.mode == 'simple':
                 self.task_num -= 1
-            self._action_feedback = ''
 
         return self._idle()

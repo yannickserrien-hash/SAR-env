@@ -6,7 +6,7 @@ from SaR_gui import visualization_server
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from engine.engine_planner import EnginePlanner
-from engine.llm_utils import init_llm_pool
+from agents1.async_model_prompting import init_marble_pool
 
 if __name__ == "__main__":
     fld = os.getcwd()
@@ -22,18 +22,20 @@ if __name__ == "__main__":
     planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
 
     planning_mode = 'dag'        # 'simple' (flat list) or 'dag' (task graph with conditionals)
+    comm_strategy = 'priority'   # 'priority' (Strategy 1) or 'scheduled' (Strategy 2)
 
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
     manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
 
     # Scale LLM thread pool for the number of agents
-    init_llm_pool(num_rescue_agents)
+    init_marble_pool(num_rescue_agents)
 
     builder, agents = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,
         num_rescue_agents=num_rescue_agents, include_human=include_human,
-        ollama_base_port=ollama_base_port, planning_mode=planning_mode
+        ollama_base_port=ollama_base_port, planning_mode=planning_mode,
+        comm_strategy=comm_strategy,
     )
 
     # Start overarching MATRX scripts and threads

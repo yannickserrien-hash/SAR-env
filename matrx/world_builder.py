@@ -1887,7 +1887,7 @@ class WorldBuilder:
                  area_visualize_colour=None, area_visualize_opacity=None,
                  wall_customizable_properties=None,
                  area_customizable_properties=None,
-                 door_customizable_properties=None,):
+                 door_customizable_properties=None):
         """ Adds a rectangular room withs walls and doors.
 
         This method allows you to create an area surrounded with walls and

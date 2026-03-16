@@ -48,6 +48,13 @@ reason_system: |
   - If the current plan does not match what you observe, or you cannot make progress, use Replan to request a new plan.
   - If ACTION FEEDBACK reports a failure, do NOT repeat the failed action. Try a different approach.
 
+  COMMUNICATION:
+  - You can use SendMessage to coordinate with teammates. Sending a message costs your action for that tick.
+  - Check TEAMMATE MESSAGES for incoming messages from other agents.
+  - If a teammate asks for help (tag:ask_help) with a critical victim or big rock, consider assisting.
+  - Use tag:share_info to share discovered victim locations with teammates.
+  - Use tag:reply to respond to direct questions. Only communicate when genuinely useful.
+
 
 # ---------------------------------------------------------------------------
 # Reasoning: user prompt template for the main per-tick decision call
@@ -58,3 +65,4 @@ reasoning_user: |
   YOUR POSITION: {agent_pos}  CARRYING: {carrying}
   LAST ACTIONS:{prev_action}
   ACTION FEEDBACK: {action_feedback}
+  TEAMMATE MESSAGES: {communication}

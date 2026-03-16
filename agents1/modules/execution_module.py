@@ -31,13 +31,22 @@ logger = logging.getLogger('action_dispatch')
 # Direction moves require no kwargs.
 _MOVE_ACTIONS = frozenset({'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest'})
 
+_DEFAULT_TASK_COMPLETING = {
+    'MoveNorth': 'moving north',
+    'MoveSouth': 'moving south',
+    'MoveEast': 'moving east',
+    'MoveWest': 'moving west',
+    'Drop': 'dropping carried victim',
+    'DropObjectTogether': 'dropping carried victim cooperatively',
+    'Idle': 'idling',
+}
 
 def execute_action(
     name: str,
     args: Dict[str, Any],
     partner_name: str = '',
     agent_id: Optional[str] = None,
-) -> Tuple[str, Dict[str, Any]]:
+) -> Tuple[str, Dict[str, Any], str]:
     """Map an action *name* + LLM-supplied *args* to a MATRX (action, kwargs) pair.
 
     Args:
@@ -48,71 +57,83 @@ def execute_action(
         agent_id:     Optional agent ID for logging context.
 
     Returns:
-        ``(action_class_name, kwargs)`` ready for MATRX ``decide_on_actions``.
+        ``(action_class_name, kwargs, task_completing)`` ready for MATRX.
     """
     log_prefix = f"[{agent_id}] " if agent_id else ""
     print(f"{log_prefix}Dispatching action '{name}' with args {args} and partner '{partner_name}'")
+
+    # Extract task_completing before dispatching (falls back to defaults)
+    task_completing = args.pop('task_completing', '') or _DEFAULT_TASK_COMPLETING.get(name, '')
     
     # ── Movement ──────────────────────────────────────────────────────────
     if name in _MOVE_ACTIONS:
-        return name, {}
+        return name, {}, task_completing
 
     if name == 'MoveTo':
-        return 'MoveTo', {'x': args.get('x', 0), 'y': args.get('y', 0)}
+        return 'MoveTo', {'x': args.get('x', 0), 'y': args.get('y', 0)}, task_completing
+
+    if name == "MoveToArea":
+        return 'MoveToArea', {'area': args.get('area', 1)}, task_completing
+    
+    if name == "EnterArea":
+        return 'EnterArea', {'area': args.get('area', 1)}, task_completing
 
     if name == 'NavigateToDropZone':
-        return 'NavigateToDropZone', {}
-    
+        return 'NavigateToDropZone', {}, task_completing
+
     if name == 'SendMessage':
-        return 'SendMessage', {'message': args.get('message', "Empty"), 'send_to': args.get('send_to', "all")}
+        return 'SendMessage', {
+            'message': args.get('message', "Empty"),
+            'send_to': args.get('send_to', "all"),
+            'tag': args.get('tag', 'share_info'),
+        }, task_completing
 
     # ── Solo carry / drop ─────────────────────────────────────────────────
     if name == 'CarryObject':
         obj_id = args.get('object_id', '')
         if not obj_id:
             logger.warning("%sCarryObject called without object_id", log_prefix)
-            return _Idle.__name__, {'duration_in_ticks': 1}
-        return _CarryObject.__name__, {'object_id': obj_id}
-    
+            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
+        return _CarryObject.__name__, {'object_id': obj_id}, task_completing
 
     if name == 'Drop':
-        return _Drop.__name__, {'partner_name': partner_name}
+        return _Drop.__name__, {}, task_completing
 
     # ── Cooperative carry / drop ──────────────────────────────────────────
     if name == 'CarryObjectTogether':
         obj_id = args.get('object_id', '')
         if not obj_id:
             logger.warning("%sCarryObjectTogether called without object_id", log_prefix)
-            return _Idle.__name__, {'duration_in_ticks': 1}
-        return _CarryObjectTogether.__name__, {'object_id': obj_id, 'partner_name': partner_name}
+            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
+        return _CarryObjectTogether.__name__, {'object_id': obj_id, 'partner_name': partner_name}, task_completing
 
     if name == 'DropObjectTogether':
-        return _DropObjectTogether.__name__, {'partner_name': partner_name}
+        return _DropObjectTogether.__name__, {'partner_name': partner_name}, task_completing
 
     # ── Remove obstacle (solo) ────────────────────────────────────────────
     if name == 'RemoveObject':
         obj_id = args.get('object_id', '')
         if not obj_id:
             logger.warning("%sRemoveObject called without object_id", log_prefix)
-            return _Idle.__name__, {'duration_in_ticks': 1}
-        return _RemoveObject.__name__, {'object_id': obj_id, 'remove_range': 1}
+            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
+        return _RemoveObject.__name__, {'object_id': obj_id, 'remove_range': 1}, task_completing
 
     # ── Remove obstacle (cooperative) ─────────────────────────────────────
     if name == 'RemoveObjectTogether':
         obj_id = args.get('object_id', '')
         if not obj_id:
             logger.warning("%sRemoveObjectTogether called without object_id", log_prefix)
-            return _Idle.__name__, {'duration_in_ticks': 1}
+            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
         return _RemoveObjectTogether.__name__, {
             'object_id': obj_id,
             'remove_range': 1,
             'partner_name': partner_name,
-        }
+        }, task_completing
 
     # ── Idle ──────────────────────────────────────────────────────────────
     if name == 'Idle':
         ticks = int(args.get('duration_in_ticks', 1))
-        return _Idle.__name__, {'duration_in_ticks': ticks}
+        return _Idle.__name__, {'duration_in_ticks': ticks}, task_completing
 
     logger.warning("%sUnknown action '%s', defaulting to Idle", log_prefix, name)
-    return _Idle.__name__, {'duration_in_ticks': 1}
+    return _Idle.__name__, {'duration_in_ticks': 1}, ''

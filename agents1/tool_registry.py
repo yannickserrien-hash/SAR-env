@@ -47,7 +47,9 @@ GAME_RULES = (
     "- Trees can only be removed by the rescue robot (RemoveObject).\n"
     "- Small stones can be removed solo (RemoveObject).\n"
     "- Deliver rescued victims to the drop zone at (23, 8).\n"
-    "- You can only carry one victim at a time."
+    "- You can only carry one victim at a time.\n"
+    "- Use SendMessage to coordinate with teammates (e.g. ask for help, share discoveries).\n"
+    "- Sending a message costs your action for that tick (you will be Idle)."
 )
 
 # ── Action tools ──────────────────────────────────────────────────────────────
@@ -57,27 +59,27 @@ GAME_RULES = (
 
 
 @tool
-def MoveNorth():
+def MoveNorth(task_completing: str):
     """Move one cell north (decreases y by 1)."""
-    return 'MoveNorth', {}, {'task_completing': "moving north"}
+    return 'MoveNorth', {}, {'task_completing': task_completing}
 
 
 @tool
-def MoveSouth():
+def MoveSouth(task_completing: str):
     """Move one cell south (increases y by 1)."""
-    return 'MoveSouth', {}, {'task_completing': "moving south"}
+    return 'MoveSouth', {}, {'task_completing': task_completing}
 
 
 @tool
-def MoveEast():
+def MoveEast(task_completing: str):
     """Move one cell east (increases x by 1)."""
-    return 'MoveEast', {}, {'task_completing': "moving east"}
+    return 'MoveEast', {}, {'task_completing': task_completing}
 
 
 @tool
-def MoveWest():
+def MoveWest(task_completing: str):
     """Move one cell west (decreases x by 1)."""
-    return 'MoveWest', {}, {'task_completing': "moving west"}
+    return 'MoveWest', {}, {'task_completing': task_completing}
 
 
 @tool
@@ -91,6 +93,24 @@ def MoveTo(x: int, y: int, task_completing: str):
                         (e.g. "approaching victim to carry" or "navigating to drop zone").
     """
     return 'MoveTo', {'x': x, 'y': y, 'task_completing': task_completing}
+
+@tool
+def EnterArea(area:int, task_completing: str):
+    """When at the door of an area, if the path is not blocked, enter it.
+    """
+    return 'EnterArea', {'area': area}, {'task_completing': task_completing}
+
+
+@tool
+def MoveToArea(area: int, task_completing: str):
+    """Navigate to a specific Area using A* pathfinding.
+
+    Args:
+        Area: the number of the area to navigate to
+        task_completing: A brief description of the subtask this move will complete
+                        (e.g. "approaching victim to carry" or "navigating to drop zone").
+    """
+    return 'MoveToArea', {'area': area}, {'task_completing': task_completing}
 
 
 @tool
@@ -185,19 +205,27 @@ def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
     return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
 
 @tool
-def SendMessage(message: str, send_to: str):
-    """Send a message to one or all teammates. Can be a question, help request or an answer to another agent's question.
+def SendMessage(message: str, send_to: str, tag: str = 'share_info'):
+    """Send a tagged message to one or all teammates. Sending a message costs your action for this tick.
+
     Args:
-        message: A string with the message to be sent.
-        send_to: Can be the name of a specific agent, or "all" if the message should be broadcasted to all.
+        message: The message content to send.
+        send_to: Target: a specific agent name (e.g. "RescueBot1") or "all" for broadcast.
+        tag: Message type. One of:
+             - "ask_help": Request cooperative action from another agent.
+             - "share_info": Share a discovery (victim location, obstacle, etc.).
+             - "request_task": Ask the planner or a teammate for a new task.
+             - "task_update": Report progress on current task.
+             - "request_info": Request information from another agent.
+             - "reply": Response to a previously received message.
     """
-    return 'SendMessage', {'message': message}, {'send_to': send_to}
+    return 'SendMessage', {'message': message, 'tag': tag}, {'send_to': send_to}
 
 
 # Ordered list of every action tool — used to build the registry + LLM schemas.
 ALL_ACTION_TOOLS = [
     MoveNorth, MoveSouth, MoveEast, MoveWest,
-    MoveTo, NavigateToDropZone,
+    MoveTo, MoveToArea, EnterArea, NavigateToDropZone,
     CarryObject, CarryObjectTogether,
     Drop, DropObjectTogether,
     RemoveObject, RemoveObjectTogether,

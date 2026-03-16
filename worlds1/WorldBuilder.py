@@ -104,6 +104,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                 agents.append(brain)
                 print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
             elif agent_type == 'marble':
+                agent_api_base = f"http://localhost:{ollama_base_port + agent_nr}"
                 brain = SearchRescueAgent(
                     slowdown=8,
                     condition=condition,
@@ -114,6 +115,8 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     include_human=include_human,
                     shared_memory=marble_shared_memory,
                     planning_mode=planning_mode,
+                    api_base=agent_api_base,
+                    comm_strategy='priority',
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")
@@ -224,7 +227,7 @@ def add_water(builder):
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
                    num_rescue_agents=1, include_human=True, ollama_base_port=11434,
-                   planning_mode='simple'):
+                   planning_mode='simple', comm_strategy='priority'):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -236,6 +239,34 @@ def create_builder(condition, name, folder, agent_type='baseline',
     current_exp_folder = datetime.now().strftime("exp_"+condition+"_at_time_%Hh-%Mm-%Ss_date_%dd-%mm-%Yy") #TODO: change file name to include more information on the experiment
     logger_save_folder = os.path.join("logs", current_exp_folder)
     builder.add_logger(ActionLogger, log_strategy=1, save_path=logger_save_folder, file_name_prefix="actions_")
+    
+    # Array of configurable room objects
+    areas_config = [
+        # World Bounds
+        {"id": "world_bounds", "pos": (0, 0), "w": 25, "h": 24, "door": None, "mat": None},
+        
+        # Row 1
+        {"id": 1, "pos": (1, 1), "w": 5, "h": 4, "door": (3, 4), "mat": (3, 5), "enter": "North"},
+        {"id": 2, "pos": (7, 1), "w": 5, "h": 4, "door": (9, 4), "mat": (9, 5), "enter": "North"},
+        {"id": 3, "pos": (13, 1), "w": 5, "h": 4, "door": (15, 4), "mat": (15, 5), "enter": "North"},
+        {"id": 4, "pos": (19, 1), "w": 5, "h": 4, "door": (21, 4), "mat": (21, 5), "enter": "North"},
+        
+        # Row 2
+        {"id": 5, "pos": (1, 7), "w": 5, "h": 4, "door": (3, 7), "mat": (3, 6), "enter": "South"},
+        {"id": 6, "pos": (7, 7), "w": 5, "h": 4, "door": (9, 7), "mat": (9, 6), "enter": "South"},
+        {"id": 7, "pos": (13, 7), "w": 5, "h": 4, "door": (15, 7), "mat": (15, 6), "enter": "South"},
+        
+        # Row 3 (Previously Commented Out)
+        {"id": 8, "pos": (1, 13), "w": 5, "h": 4, "door": (3, 16), "mat": (3, 17), "enter": "North"},
+        {"id": 9, "pos": (7, 13), "w": 5, "h": 4, "door": (9, 16), "mat": (9, 17), "enter": "North"},
+        {"id": 10, "pos": (13, 13), "w": 5, "h": 4, "door": (15, 16), "mat": (15, 17), "enter": "North"},
+        
+        # Row 4 (Previously Commented Out)
+        {"id": 11, "pos": (1, 19), "w": 5, "h": 4, "door": (3, 19), "mat": (3, 18), "enter": "South"},
+        {"id": 12, "pos": (7, 19), "w": 5, "h": 4, "door": (9, 19), "mat": (9, 18), "enter": "South"},
+        {"id": 13, "pos": (13, 19), "w": 5, "h": 4, "door": (15, 19), "mat": (15, 18), "enter": "South"},
+        {"id": 14, "pos": (19, 19), "w": 5, "h": 4, "door": (21, 19), "mat": (21, 18), "enter": "South"}
+    ]
         
     # Add all area and objects to the official world
     builder.add_room(top_left_location=(0, 0), width=25, height=24, name="world_bounds", wall_visualize_colour="#1F262A")
