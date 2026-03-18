@@ -32,10 +32,6 @@ logger = logging.getLogger('action_dispatch')
 _MOVE_ACTIONS = frozenset({'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest'})
 
 _DEFAULT_TASK_COMPLETING = {
-    'MoveNorth': 'moving north',
-    'MoveSouth': 'moving south',
-    'MoveEast': 'moving east',
-    'MoveWest': 'moving west',
     'Drop': 'dropping carried victim',
     'DropObjectTogether': 'dropping carried victim cooperatively',
     'Idle': 'idling',
@@ -85,7 +81,7 @@ def execute_action(
         return 'SendMessage', {
             'message': args.get('message', "Empty"),
             'send_to': args.get('send_to', "all"),
-            'tag': args.get('tag', 'share_info'),
+            'message_type': args.get('message_type', 'message'),
         }, task_completing
 
     # ── Solo carry / drop ─────────────────────────────────────────────────

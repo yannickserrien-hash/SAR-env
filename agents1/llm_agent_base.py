@@ -49,8 +49,8 @@ from matrx.actions.object_actions import RemoveObject as _RemoveObject
 
 from agents1.action_mapper import ActionMapper
 from agents1.async_model_prompting import get_llm_result, submit_llm_call
+from agents1.modules.communication_module import CommunicationModule
 from agents1.modules.execution_module import execute_action
-from agents1.modules.message_handler import MessageHandler, MessageRecord
 from agents1.modules.perception_module import Perception
 from agents1.modules.planning_module import Planning
 from brains1.ArtificialBrain import ArtificialBrain
@@ -64,6 +64,7 @@ logger = logging.getLogger('LLMAgentBase')
 MAX_NR_TOKENS: int = 3000
 TEMPERATURE: float = 0.3
 CARRY_WAIT_TIMEOUT_TICKS: int = 100
+
 AREAS_CONFIG = [
         # World Bounds
         {"id": "world_bounds", "pos": (0, 0), "w": 25, "h": 24, "door": None, "mat": None},
@@ -118,7 +119,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
     _SKIP_MATRX_CHECK = frozenset({
         'Idle', 'MoveTo', 'NavigateToDropZone', 'Drop'
         'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest', 'SendMessage',
-        _CarryObjectTogether.__name__,   # managed by the carry retry loop
     })
     
     _OBJECT_TYPES = frozenset({"victim", "tree", "rock", "stone"})
@@ -136,6 +136,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
         api_base: Optional[str] = None,
+        capabilities: Optional[Dict] = None,
+        capability_knowledge: str = 'informed',
+        comm_strategy: str = 'always_respond',
     ) -> None:
         super().__init__(slowdown, condition, name, folder)
 
@@ -144,6 +147,13 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._include_human = include_human
         self._partner_name = name
         self.teammates: set = set()
+
+        # ── Capabilities ──────────────────────────────────────────────────
+        self._capabilities = capabilities
+        self._capability_knowledge = capability_knowledge
+
+        # ── Communication ─────────────────────────────────────────────────
+        self._comm_strategy = comm_strategy
 
         # ── Memory ─────────────────────────────────────────────────────────
         self.memory = BaseMemory()
@@ -166,6 +176,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # ── Task ───────────────────────────────────────────────────────────
         self._current_task: Optional[str] = None
 
+        # ── Action feedback ────────────────────────────────────────────────
+        self._action_feedback: str = ''
+
         # ── Cooperative carry state ────────────────────────────────────────
         self._pending_carry_kwargs: Optional[dict] = None
         self._carry_wait_ticks: int = 0
@@ -175,20 +188,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         # ── World state (populated each tick by _tick_setup) ───────────────
         self.WORLD_STATE: Dict = {}
-
-        # ── Communication ─────────────────────────────────────────────────
-        self._msg_handler = MessageHandler()
-        self._comm_strategy: str = 'priority'  # 'priority' or 'scheduled'
-        self._current_tick: int = 0
-
-        # Strategy 1 (priority): async reply generation
-        self._priority_reply_future: Optional[Future] = None
-        self._priority_reply_target: Optional[str] = None
-
-        # Strategy 2 (scheduled): busyness-based scheduling
-        self._deferred_message: Optional[MessageRecord] = None
-        self._pending_reply_tick: Optional[int] = None
-        self._in_conversation_with: Optional[str] = None
 
     # ── MATRX lifecycle ───────────────────────────────────────────────────
 
@@ -200,8 +199,13 @@ class LLMAgentBase(ArtificialBrain, Perception):
             action_set=self.action_set,
             algorithm=Navigator.A_STAR_ALGORITHM,
         )
-        self._msg_handler.agent_id = self.agent_id
         self.init_global_state()
+        self.comm = CommunicationModule(
+            agent_id=self.agent_id,
+            strategy=self._comm_strategy,
+            llm_model=self._llm_model,
+            api_base=self._api_base,
+        )
         logger.info('[%s] LLMAgentBase ready (model=%s)', self.agent_id, self._llm_model)
 
     # ── Default perception filter ─────────────────────────────────────────
@@ -280,17 +284,14 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
     # ── Per-tick infrastructure entry-points ──────────────────────────────
 
-    def process_observations(self, filtered_state: State) -> None:
+    def update_knowledge(self, filtered_state: State) -> None:
         """Update state tracker and perception. Call at the top of ``decide_on_actions``."""
         self._state_tracker.update(self.state_for_navigation)
         self.WORLD_STATE = self.percept_state(
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
-        # Track tick count for communication scheduling
-        world_data = filtered_state.get('World', {})
-        self._current_tick = world_data.get('nr_ticks', self._current_tick + 1)
-        self.update_observation(filtered_state)
-        
+        self.update_state_belief(filtered_state)
+        self.comm.process_messages(self.received_messages)
 
     def _run_preamble(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
         """Handle all infrastructure concerns before the agent's reasoning step.
@@ -299,8 +300,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             1. Cooperative carry retry loop
             2. Ongoing A* navigation
             3. SharedMemory rendezvous navigation
-            4. Incoming message handling (strategy-dependent)
-            5. Pending LLM future poll
+            4. Pending LLM future poll
 
         Returns an ``(action_name, kwargs)`` tuple if infrastructure needs to
         act this tick, or ``None`` if the agent should proceed with its own
@@ -317,14 +317,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         rendezvous = self._handle_rendezvous()
         if rendezvous is not None:
             return rendezvous
-
-        # Communication: handle incoming messages based on strategy
-        if self._comm_strategy == 'priority':
-            comm = self._handle_priority_reply()
-        else:
-            comm = self._handle_scheduled_reply()
-        if comm is not None:
-            return comm
 
         poll = self.check_if_llm_response_ready(filtered_state)
         if poll is not None:
@@ -357,15 +349,14 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._carry_wait_ticks += 1
         if self._carry_wait_ticks > CARRY_WAIT_TIMEOUT_TICKS:
             print(f'[{self.agent_id}] Carry timeout after {CARRY_WAIT_TIMEOUT_TICKS} ticks')
-
+            
             self.memory.update('action_failure', {
                 'victim_id': obj_id,
                 'action': "Carry",
                 'ticks_waited': CARRY_WAIT_TIMEOUT_TICKS,
                 'feedback': (
                 f"CarryObjectTogether for victim '{obj_id}' failed: "
-                f"partner did not arrive within {CARRY_WAIT_TIMEOUT_TICKS} ticks."
-            )
+                f"partner did not arrive within {CARRY_WAIT_TIMEOUT_TICKS} ticks.")
             })
             
             self._pending_carry_kwargs = None
@@ -473,9 +464,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
             if (check := self._validate_action(name, args)) is not None:
                 return check
-            action_name, kwargs, task_completing = execute_action(name, args, partner, self.agent_id)
-        else:
-            # ── Path B: plain-text JSON fallback ──────────────────────────────
+            action_name, kwargs, task_completed = execute_action(name, args, partner, self.agent_id)
+
+        else: # ── Path B: plain-text JSON fallback ──────────────────────────────
             llm_text = getattr(message, 'content', '') or ''
             print(f'[{self.agent_id}] Text response: {llm_text[:120]}')
 
@@ -486,10 +477,13 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
             if (check := self._validate_action(raw_name, raw_args)) is not None:
                 return check
-            action_name, kwargs, task_completing = execute_action(raw_name, raw_args, partner, self.agent_id)
+            action_name, kwargs, task_completed = execute_action(raw_name, raw_args, partner, self.agent_id)
 
-        self.planner.advance_task(task_completing)
+        self.planner.advance_task(action_name)
         self.memory.update('action', {'action': action_name, 'args': kwargs})
+        comm_result = self._apply_communication(action_name, kwargs)
+        if comm_result is not None:
+            return comm_result
         return self._apply_navigation(action_name, kwargs)
 
     def _apply_navigation(
@@ -502,6 +496,14 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         if action_name == 'MoveTo':
             coords = (int(kwargs.get('x', 0)), int(kwargs.get('y', 0)))
+            self._navigator.reset_full()
+            self._navigator.add_waypoints([coords])
+            self._nav_target = coords
+            move = self._navigator.get_move_action(self._state_tracker)
+            return (move, {}) if move else self._idle()
+
+        if action_name == 'NavigateToDropZone':
+            coords = (23, 8)
             self._navigator.reset_full()
             self._navigator.add_waypoints([coords])
             self._nav_target = coords
@@ -531,27 +533,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
             if direction == 'South':
                 return ('MoveSouth', {})
 
-        if action_name == 'NavigateToDropZone':
-            coords = (23, 8)
-            self._navigator.reset_full()
-            self._navigator.add_waypoints([coords])
-            self._nav_target = coords
-            move = self._navigator.get_move_action(self._state_tracker)
-            return (move, {}) if move else self._idle()
-
-        if action_name == 'SendMessage':
-            send_to = kwargs.get('send_to', '')
-            tag = kwargs.get('tag', 'share_info')
-            raw_message = kwargs.get('message', '')
-            content = f"[tag:{tag}] {raw_message}"
-            target = None if 'all' in send_to else send_to
-            self._send_message(content=content, sender=self.agent_id, target_id=target)
-            self.memory.update('sent_message', {
-                'to': send_to, 'tag': tag, 'content': raw_message,
-            })
-            self._reasoning_step = True
-            return self._idle()
-
         if action_name == _CarryObjectTogether.__name__:
             self._pending_carry_kwargs = dict(kwargs)
             self._carry_wait_ticks = 0
@@ -559,6 +540,35 @@ class LLMAgentBase(ArtificialBrain, Perception):
             return action_name, kwargs
 
         return action_name, kwargs
+
+    def _apply_communication(
+        self, action_name: str, kwargs: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict]]:
+        """Handle SendMessage actions. Returns Idle if sent, None if not SendMessage."""
+        if action_name != 'SendMessage':
+            return None
+
+        send_to = kwargs.get('send_to', '')
+        message_type = kwargs.get('message_type', 'message')
+        text = kwargs.get('message', '')
+
+        # Build structured content and send via MATRX
+        target = None if send_to == 'all' else send_to
+        content = {'message_type': message_type, 'text': text}
+        msg = Message(content=content, from_id=self.agent_id, to_id=target)
+        self.send_message(msg)
+
+        # Auto-announce: if private 'help' reply to someone who asked, broadcast
+        if message_type == 'help' and target is not None:
+            if self.comm.has_pending_ask_help(from_agent=send_to):
+                ann = {
+                    'message_type': 'message',
+                    'text': f'{self.agent_id} is responding to {send_to} help request',
+                }
+                self.send_message(Message(content=ann, from_id=self.agent_id, to_id=None))
+
+        self._reasoning_step = True
+        return self._idle()
 
     # ── Action validation ─────────────────────────────────────────────────
 
@@ -638,167 +648,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         msg = Message(content=content, from_id=sender, to_id=target_id)
         if content not in [m.content for m in self.messages_to_send]:
             self.send_message(msg)
-
-    # ── Communication strategies ──────────────────────────────────────────
-
-    def _handle_priority_reply(self) -> Optional[Tuple[str, Dict]]:
-        """Strategy 1: Private messages trigger a priority async LLM reply.
-
-        Broadcasts are NOT interrupted — they are absorbed into the
-        communication context that ``get_context_for_prompt()`` provides.
-        """
-        # Poll an in-flight reply
-        if self._priority_reply_future is not None:
-            result = get_llm_result(self._priority_reply_future)
-            if result is None:
-                return self._idle()  # still generating reply
-            reply_text = getattr(result[0], 'content', '') or ''
-            self._send_message(
-                content=f'[tag:reply] {reply_text}',
-                sender=self.agent_id,
-                target_id=self._priority_reply_target,
-            )
-            self.memory.update('sent_reply', {
-                'to': self._priority_reply_target, 'content': reply_text,
-            })
-            self._priority_reply_future = None
-            self._priority_reply_target = None
-            self._reasoning_step = True
-            return self._idle()
-
-        # Check for new unprocessed private messages
-        new_privates = self._msg_handler.get_unprocessed_private()
-        if not new_privates:
-            return None
-
-        msg = new_privates[0]
-        msg.processed = True
-        return self._submit_reply_llm_call(msg)
-
-    def _handle_scheduled_reply(self) -> Optional[Tuple[str, Dict]]:
-        """Strategy 2: Event-driven message scheduling based on busyness.
-
-        Scheduling rules:
-            - Heavy action + non-help tag → drop message
-            - Light action → defer by 2 ticks
-            - Idle + private → defer by 2 ticks
-            - Heavy + ask_help → defer by 1 tick
-            - Already in conversation with someone else → reply "busy"
-        """
-        # Poll an in-flight reply
-        if self._priority_reply_future is not None:
-            result = get_llm_result(self._priority_reply_future)
-            if result is None:
-                return self._idle()
-            reply_text = getattr(result[0], 'content', '') or ''
-            self._send_message(
-                content=f'[tag:reply] {reply_text}',
-                sender=self.agent_id,
-                target_id=self._priority_reply_target,
-            )
-            self._priority_reply_future = None
-            self._priority_reply_target = None
-            self._in_conversation_with = None
-            self._reasoning_step = True
-            return self._idle()
-
-        # Check if a deferred reply is due
-        if (
-            self._deferred_message is not None
-            and self._pending_reply_tick is not None
-            and self._current_tick >= self._pending_reply_tick
-        ):
-            msg = self._deferred_message
-            self._deferred_message = None
-            self._pending_reply_tick = None
-            return self._submit_reply_llm_call(msg)
-
-        # Process new messages
-        self._msg_handler.parse_new_messages(self.received_messages)
-        for msg in self._msg_handler.get_unprocessed():
-            if msg.from_id == self.agent_id:
-                msg.processed = True
-                continue
-
-            # Already in conversation with someone else
-            if (
-                self._in_conversation_with is not None
-                and msg.from_id != self._in_conversation_with
-                and msg.is_private
-            ):
-                self._send_message(
-                    content='[tag:reply] I\'m busy with another task, try again later.',
-                    sender=self.agent_id,
-                    target_id=msg.from_id,
-                )
-                msg.processed = True
-                continue
-
-            busyness = self._classify_busyness()
-
-            if busyness == 'heavy' and msg.tag != 'ask_help':
-                msg.processed = True  # drop
-                continue
-            elif busyness == 'heavy' and msg.tag == 'ask_help':
-                self._deferred_message = msg
-                self._pending_reply_tick = self._current_tick + 1
-                msg.processed = True
-                break
-            elif busyness == 'light':
-                self._deferred_message = msg
-                self._pending_reply_tick = self._current_tick + 2
-                msg.processed = True
-                break
-            elif busyness == 'idle' and msg.is_private:
-                self._deferred_message = msg
-                self._pending_reply_tick = self._current_tick + 2
-                msg.processed = True
-                break
-            else:
-                msg.processed = True  # broadcast while idle — absorbed into context
-
-        return None
-
-    def _classify_busyness(self) -> str:
-        """Determine current busyness level for Strategy 2 scheduling."""
-        if self._pending_carry_kwargs is not None:
-            return 'heavy'
-        if self._nav_target is not None:
-            return 'light'
-        if self._pending_future is not None:
-            return 'light'
-        return 'idle'
-
-    def _submit_reply_llm_call(self, msg: MessageRecord) -> Tuple[str, Dict]:
-        """Submit an async LLM call to generate a reply to a teammate message."""
-        agent_pos = (
-            self.WORLD_STATE.get('agent', {}).get('location', 'unknown')
-            if isinstance(self.WORLD_STATE, dict) else 'unknown'
-        )
-        reply_prompt = [
-            {'role': 'system', 'content': (
-                'You received a message from a teammate in a search and rescue mission. '
-                'Write a brief, helpful reply (1-2 sentences). '
-                'If they ask for help, say whether you can help based on your current task.'
-            )},
-            {'role': 'user', 'content': (
-                f'FROM: {msg.from_id}\n'
-                f'TAG: {msg.tag}\n'
-                f'MESSAGE: {msg.content}\n'
-                f'YOUR CURRENT TASK: {self._current_task}\n'
-                f'YOUR POSITION: {agent_pos}'
-            )},
-        ]
-        self._priority_reply_future = submit_llm_call(
-            llm_model=self._llm_model,
-            messages=reply_prompt,
-            max_token_num=200,
-            temperature=TEMPERATURE,
-            api_base=self._api_base,
-        )
-        self._priority_reply_target = msg.from_id
-        self._in_conversation_with = msg.from_id
-        return self._idle()
 
     # ── Utilities ─────────────────────────────────────────────────────────
 

@@ -40,6 +40,8 @@ REASONING_STRATEGIES: Dict[str, str] = {
     ),
 }
 
+# Static fallback game rules (used when capabilities module is not available).
+# For capability-aware rules, use agents1.capabilities.get_game_rules(caps).
 GAME_RULES = (
     "Rules:\n"
     "- Critically injured victims require CarryObjectTogether (both agents).\n"
@@ -47,9 +49,7 @@ GAME_RULES = (
     "- Trees can only be removed by the rescue robot (RemoveObject).\n"
     "- Small stones can be removed solo (RemoveObject).\n"
     "- Deliver rescued victims to the drop zone at (23, 8).\n"
-    "- You can only carry one victim at a time.\n"
-    "- Use SendMessage to coordinate with teammates (e.g. ask for help, share discoveries).\n"
-    "- Sending a message costs your action for that tick (you will be Idle)."
+    "- You can only carry one victim at a time."
 )
 
 # ── Action tools ──────────────────────────────────────────────────────────────
@@ -205,27 +205,22 @@ def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
     return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
 
 @tool
-def SendMessage(message: str, send_to: str, tag: str = 'share_info'):
-    """Send a tagged message to one or all teammates. Sending a message costs your action for this tick.
+def SendMessage(message: str, send_to: str, message_type: str = "message"):
+    """Send a message to one or all teammates. This uses your action for this tick.
 
     Args:
         message: The message content to send.
-        send_to: Target: a specific agent name (e.g. "RescueBot1") or "all" for broadcast.
-        tag: Message type. One of:
-             - "ask_help": Request cooperative action from another agent.
-             - "share_info": Share a discovery (victim location, obstacle, etc.).
-             - "request_task": Ask the planner or a teammate for a new task.
-             - "task_update": Report progress on current task.
-             - "request_info": Request information from another agent.
-             - "reply": Response to a previously received message.
+        send_to: Agent name for directed message, or "all" for broadcast.
+        message_type: One of: ask_help (expects reply), help (response to ask_help), message (general).
     """
-    return 'SendMessage', {'message': message, 'tag': tag}, {'send_to': send_to}
+    return 'SendMessage', {'message': message, 'send_to': send_to,
+        'message_type': message_type}, {'task_completing': f"sending {message_type} message"}
 
 
 # Ordered list of every action tool — used to build the registry + LLM schemas.
 ALL_ACTION_TOOLS = [
     MoveNorth, MoveSouth, MoveEast, MoveWest,
-    MoveTo, MoveToArea, EnterArea, NavigateToDropZone,
+    MoveTo, NavigateToDropZone, MoveToArea, EnterArea,
     CarryObject, CarryObjectTogether,
     Drop, DropObjectTogether,
     RemoveObject, RemoveObjectTogether,

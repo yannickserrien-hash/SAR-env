@@ -9,8 +9,36 @@ from agents1.modules.utils_prompting import to_toon
 logger = logging.getLogger('Planning')
 
 TASK_DECOMPOSITION_PROMPT = """
-You are an expert planner for a team of agents in a search and rescue simulation.
-Your job is to decompose high-level tasks into actionable subgoals for the agents.
+You are an expert planner for a team of agents in a search and rescue mission.
+Your job is to break a task into subtasks. The subtask needs to be atomic and should have a clear definition of done.
+
+I will give you the following information:
+Task: The task that needs to be broken down into subtasks
+Position: Agent's current position.
+Nearby objects: The surrounding objects. Can be house walls, victims or obstacles.
+All observed objects and their location in the world: All objects (victims, walls, obstacles) observed by the agent while exploring. These might or might not be still there.
+Carrying: what victim the agent is carrying right now.
+Rescued victims: which victims have been rescued.
+You know the entrance locations for each area as [x,y] coordinates: 
+Area 1: [3, 4] Area 2: [9, 4] Area 3: [15, 4] Area 4: [21, 4] Area 5: [3, 7] Area 6: [9, 7] Area 7: [15, 7]
+
+"""
+
+PLANNER_PROMPT = """
+You are an expert planner for a team of agents in a search and rescue mission. The goal of the mission is to rescue all victims trapped inside the areas.
+Your job is to come up with the best next task for the agent. The task needs to be atomic and should have a clear definition of done. Make sure that
+you do not assign a task that was already completed, that was already done by another agent or another agent is currently doing it.
+
+I will give you the following information:
+Previous tasks: The previous tasks that the agent was assigned to do.
+Other agent's tasks: The tasks of the other agents.
+Position: Agent's current position.
+Nearby objects: The surrounding objects. Can be house walls, victims or obstacles.
+All observed objects and their location in the world: All objects (victims, walls, obstacles) observed by the agent while exploring. These might or might not be still there.
+Carrying: what victim the agent is carrying right now.
+Rescued victims: which victims have been rescued.
+You know the entrance locations for each area as [x,y] coordinates: 
+Area 1: [3, 4] Area 2: [9, 4] Area 3: [15, 4] Area 4: [21, 4] Area 5: [3, 7] Area 6: [9, 7] Area 7: [15, 7]
 """
 
 _STOP_WORDS = frozenset({
@@ -180,6 +208,13 @@ class Planning:
             self.task_decomposition[0].status = TaskStatus.ACTIVE
         if self.mode == 'dag':
             self.task_graph = TaskGraph.from_task_list(decomposition)
+                
+    def get_planning_prompt(self, information: Dict[str, Any]) -> List[Dict[str, str]]:
+
+        return [
+            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "user",   "content": to_toon(information)},
+        ]
 
     # ── Unified interface ────────────────────────────────────────────────
 

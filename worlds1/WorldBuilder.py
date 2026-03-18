@@ -17,6 +17,7 @@ from matrx.world_builder import RandomProperty
 from matrx.goals import WorldGoal
 from agents1.agents_graveyard.RescueAgent import RescueAgent
 from agents1.search_rescue_agent import SearchRescueAgent
+from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
 from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
@@ -67,7 +68,8 @@ _AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 # Add the agents to the world
 def add_agents(builder, condition, name, folder, agent_type='baseline',
                num_rescue_agents=1, include_human=True, ollama_base_port=11434,
-               planning_mode='simple'):
+               planning_mode='simple', agent_presets=None,
+               capability_knowledge='informed', comm_strategies=None):
     """
     Add agents to the world.
 
@@ -81,9 +83,22 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         include_human: Whether to add a keyboard-controlled human agent
         ollama_base_port: Base port for Ollama instances (agent N uses base_port + N)
         planning_mode: Planning strategy for MARBLE agents ('simple' or 'dag')
+        agent_presets: List of preset names or capability dicts, one per agent.
+                       Defaults to all 'generalist'.
+        capability_knowledge: 'informed' (agents know capabilities) or 'discovery'
+                              (agents learn from failures).
     """
-    # Define the agent's sense capabilities
-    sense_capability_agent = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
+    if agent_presets is None:
+        agent_presets = [DEFAULT_PRESET] * num_rescue_agents
+    # Extend or truncate to match num_rescue_agents
+    while len(agent_presets) < num_rescue_agents:
+        agent_presets.append(agent_presets[-1] if agent_presets else DEFAULT_PRESET)
+
+    if comm_strategies is None:
+        comm_strategies = ['always_respond'] * num_rescue_agents
+    while len(comm_strategies) < num_rescue_agents:
+        comm_strategies.append(comm_strategies[-1] if comm_strategies else 'always_respond')
+
     # Define the human's sense capabilities based on the selected condition
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
 
@@ -96,6 +111,16 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         # Add the artificial agents based on condition and agent_type
         for agent_nr in range(num_rescue_agents):
             agent_name = f"RescueBot{agent_nr}"
+            caps = resolve_capabilities(agent_presets[agent_nr])
+
+            # Per-agent SenseCapability with vision from capabilities
+            sense_capability_agent = SenseCapability({
+                AgentBody: agent_sense_range,
+                CollectableBlock: caps['vision'],
+                None: other_sense_range,
+                ObstacleObject: caps['vision'],
+            })
+
             if agent_type == 'llm':
                 brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
                                     llm_model='qwen2.5:3b', include_human=include_human,
@@ -116,15 +141,19 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     shared_memory=marble_shared_memory,
                     planning_mode=planning_mode,
                     api_base=agent_api_base,
-                    comm_strategy='priority',
+                    capabilities=caps,
+                    capability_knowledge=capability_knowledge,
+                    comm_strategy=comm_strategies[agent_nr],
                 )
                 agents.append(brain)
-                print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, LiteLLM+SharedMemory)")
+                print(f"[WorldBuilder] Using Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
 
             loc = _AGENT_START_POSITIONS[agent_nr % len(_AGENT_START_POSITIONS)]
             builder.add_agent(loc, brain, team=team_name, name=agent_name,
                               customizable_properties=['score', 'thinking_state'],
                               score=0, thinking_state='idle',
+                              capabilities=caps,
+                              capability_knowledge=capability_knowledge,
                               sense_capability=sense_capability_agent,
                               is_traversable=True, img_name="/images/robot-final4.svg")
 
@@ -227,7 +256,8 @@ def add_water(builder):
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
                    num_rescue_agents=1, include_human=True, ollama_base_port=11434,
-                   planning_mode='simple', comm_strategy='priority'):
+                   planning_mode='simple', agent_presets=None,
+                   capability_knowledge='informed', comm_strategies=None):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -239,34 +269,6 @@ def create_builder(condition, name, folder, agent_type='baseline',
     current_exp_folder = datetime.now().strftime("exp_"+condition+"_at_time_%Hh-%Mm-%Ss_date_%dd-%mm-%Yy") #TODO: change file name to include more information on the experiment
     logger_save_folder = os.path.join("logs", current_exp_folder)
     builder.add_logger(ActionLogger, log_strategy=1, save_path=logger_save_folder, file_name_prefix="actions_")
-    
-    # Array of configurable room objects
-    areas_config = [
-        # World Bounds
-        {"id": "world_bounds", "pos": (0, 0), "w": 25, "h": 24, "door": None, "mat": None},
-        
-        # Row 1
-        {"id": 1, "pos": (1, 1), "w": 5, "h": 4, "door": (3, 4), "mat": (3, 5), "enter": "North"},
-        {"id": 2, "pos": (7, 1), "w": 5, "h": 4, "door": (9, 4), "mat": (9, 5), "enter": "North"},
-        {"id": 3, "pos": (13, 1), "w": 5, "h": 4, "door": (15, 4), "mat": (15, 5), "enter": "North"},
-        {"id": 4, "pos": (19, 1), "w": 5, "h": 4, "door": (21, 4), "mat": (21, 5), "enter": "North"},
-        
-        # Row 2
-        {"id": 5, "pos": (1, 7), "w": 5, "h": 4, "door": (3, 7), "mat": (3, 6), "enter": "South"},
-        {"id": 6, "pos": (7, 7), "w": 5, "h": 4, "door": (9, 7), "mat": (9, 6), "enter": "South"},
-        {"id": 7, "pos": (13, 7), "w": 5, "h": 4, "door": (15, 7), "mat": (15, 6), "enter": "South"},
-        
-        # Row 3 (Previously Commented Out)
-        {"id": 8, "pos": (1, 13), "w": 5, "h": 4, "door": (3, 16), "mat": (3, 17), "enter": "North"},
-        {"id": 9, "pos": (7, 13), "w": 5, "h": 4, "door": (9, 16), "mat": (9, 17), "enter": "North"},
-        {"id": 10, "pos": (13, 13), "w": 5, "h": 4, "door": (15, 16), "mat": (15, 17), "enter": "North"},
-        
-        # Row 4 (Previously Commented Out)
-        {"id": 11, "pos": (1, 19), "w": 5, "h": 4, "door": (3, 19), "mat": (3, 18), "enter": "South"},
-        {"id": 12, "pos": (7, 19), "w": 5, "h": 4, "door": (9, 19), "mat": (9, 18), "enter": "South"},
-        {"id": 13, "pos": (13, 19), "w": 5, "h": 4, "door": (15, 19), "mat": (15, 18), "enter": "South"},
-        {"id": 14, "pos": (19, 19), "w": 5, "h": 4, "door": (21, 19), "mat": (21, 18), "enter": "South"}
-    ]
         
     # Add all area and objects to the official world
     builder.add_room(top_left_location=(0, 0), width=25, height=24, name="world_bounds", wall_visualize_colour="#1F262A")
@@ -320,7 +322,10 @@ def create_builder(condition, name, folder, agent_type='baseline',
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
                         ollama_base_port=ollama_base_port,
-                        planning_mode=planning_mode)
+                        planning_mode=planning_mode,
+                        agent_presets=agent_presets,
+                        capability_knowledge=capability_knowledge,
+                        comm_strategies=comm_strategies)
     add_victims(builder)
     # add_obstacles(builder)
     add_decorative_objects(builder)

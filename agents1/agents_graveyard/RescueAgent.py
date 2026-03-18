@@ -23,7 +23,7 @@ from matrx.agents.agent_utils.state_tracker import StateTracker
 from matrx.messages.message import Message
 from agents1.agents_graveyard.ReasoningModule import ReasoningIO
 from agents1.agents_graveyard.PerceptionModule import PerceptionModule
-from agents1.modules.CommunicationModule import CommunicationModule
+from agents1.agents_graveyard.CommunicationModule import CommunicationModule
 from agents1.agents_graveyard.PlanningModule import PlanningModule
 from memory.short_term_memory import ShortTermMemory
 

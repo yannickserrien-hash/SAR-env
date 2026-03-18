@@ -14,8 +14,10 @@ from typing import Dict, Optional, Tuple
 
 from matrx.agents.agent_utils.state import State
 
+from agents1.capabilities import filter_tools_for_capabilities, get_capability_prompt, get_game_rules
 from agents1.llm_agent_base import LLMAgentBase
 from agents1.modules.reasoning_module import ReasoningIO
+from agents1.modules.task_critic_module import CriticBase
 from agents1.tool_registry import REASONING_STRATEGIES, build_tool_schemas
 from memory.shared_memory import SharedMemory
 
@@ -49,7 +51,9 @@ class SearchRescueAgent(LLMAgentBase):
         shared_memory: Optional[SharedMemory] = None,
         planning_mode: str = 'simple',
         api_base: Optional[str] = None,
-        comm_strategy: str = 'priority',
+        capabilities: Optional[Dict] = None,
+        capability_knowledge: str = 'informed',
+        comm_strategy: str = 'always_respond',
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -61,30 +65,40 @@ class SearchRescueAgent(LLMAgentBase):
             shared_memory=shared_memory,
             planning_mode=planning_mode,
             api_base=api_base,
+            capabilities=capabilities,
+            capability_knowledge=capability_knowledge,
+            comm_strategy=comm_strategy,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
-        self._comm_strategy = comm_strategy
         self.tools_by_name, self.tool_schemas = build_tool_schemas()
+
+        # Filter tools based on capabilities
+        if self._capabilities:
+            self.tools_by_name, self.tool_schemas = filter_tools_for_capabilities(
+                self.tool_schemas, self.tools_by_name, self._capabilities
+            )
+
         self.reasoning = ReasoningIO('EMPTY')
+        self.critic = CriticBase('EMPTY')
 
         print(
             f'[SearchRescueAgent] Created '
             f'(model={llm_model}, strategy={self._strategy}, '
-            f'planning={planning_mode}, comm={comm_strategy})'
+            f'planning={planning_mode}, caps={capabilities})'
         )
 
     # ── Main decision loop ────────────────────────────────────────────────
 
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
-        self.process_observations(filtered_state)
+        self.update_knowledge(filtered_state)
 
         if not self._current_task:
             return self._idle()
 
         # Infrastructure: carry retry, navigation, rendezvous, LLM poll
-        result = self._run_preamble(filtered_state)
-        if result is not None:
-            return result
+        action = self._run_preamble(filtered_state)
+        if action is not None:
+            return action
 
         # Agent reasoning: build prompt and submit LLM call
         if self._reasoning_step:
@@ -99,23 +113,50 @@ class SearchRescueAgent(LLMAgentBase):
             # Merge local observation with globally known objects
             observation = dict(self.WORLD_STATE)
             global_state = self.WORLD_STATE_GLOBAL
+            if any(global_state.get(k) for k in ('victims', 'obstacles', 'doors')):
+                observation['known'] = {
+                    k: v for k, v in global_state.items()
+                    if k != 'teammate_positions' and v
+                }
 
-            # Parse new messages and build communication context
-            self._msg_handler.parse_new_messages(self.received_messages)
-            comm_context = self._msg_handler.get_context_for_prompt()
-
-            prompt = self.reasoning.get_reasoning_prompt({
+            prompt_reasoning = self.reasoning.get_reasoning_prompt({
                 'task_decomposition': self.planner.get_tasks_for_reasoning(),
                 'observation': observation,
                 'all_observations': global_state,
                 'memory': self.memory.retrieve_all()[-15:],
-                'communication': comm_context,
+                'messages': self.comm.get_messages_for_prompt(limit=10),
             })
+            
+            prompt_critic = self.critic.get_critic_prompt({
+                'task_decomposition': self.planner.get_tasks_for_reasoning(),
+                'observation': observation,
+                'all_observations': global_state,
+                'memory': self.memory.retrieve_all()[-15:],
+                'messages': self.comm.get_messages_for_prompt(limit=10),
+            })
+            
+            prompt_planning = self.planner.get_planning_prompt(agent_context = {
+                "previous_tasks": None,
+                "other_agents_tasks": None,
+                "position": None,
+                "nearby_objects": None,
+                "observed_objects": None,
+                "carrying": None,
+                "rescued_victims": None,
+            })
+
+            # Inject capability info and tailored game rules into system prompt
+            if self._capabilities and self._capability_knowledge == 'informed':
+                cap_text = get_capability_prompt(self._capabilities)
+                rules_text = get_game_rules(self._capabilities)
+                extra = f"\n\n{cap_text}\n\n{rules_text}"
+                prompt_reasoning[0]['content'] = prompt_reasoning[0]['content'] + extra
+            else:
+                rules_text = get_game_rules()
+                prompt_reasoning[0]['content'] = prompt_reasoning[0]['content'] + f"\n\n{rules_text}"
+
             print(f'[{self.agent_id}] Submitting LLM call')
+            self._submit_llm(prompt_reasoning, tools=self.tool_schemas)
 
-            self._submit_llm(prompt, tools=self.tool_schemas)
-
-            if self.planner.mode == 'simple':
-                self.task_num -= 1
 
         return self._idle()

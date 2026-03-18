@@ -22,7 +22,16 @@ if __name__ == "__main__":
     planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
 
     planning_mode = 'dag'        # 'simple' (flat list) or 'dag' (task graph with conditionals)
-    comm_strategy = 'priority'   # 'priority' (Strategy 1) or 'scheduled' (Strategy 2)
+
+    # Agent capability presets — one per agent (cycles if fewer than num_rescue_agents)
+    # Available: 'scout', 'medic', 'heavy_lifter', 'generalist', or custom dicts
+    agent_presets = ['scout', 'medic']
+    # Whether agents know their capabilities upfront or discover through failure
+    capability_knowledge = 'informed'  # 'informed' | 'discovery'
+
+    # Communication strategies — one per agent (cycles if fewer than num_rescue_agents)
+    # Available: 'always_respond', 'busy_aware'
+    comm_strategies = ['always_respond', 'always_respond']
 
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
@@ -35,7 +44,8 @@ if __name__ == "__main__":
         condition=condition, name=name, agent_type=agent_type, folder=fld,
         num_rescue_agents=num_rescue_agents, include_human=include_human,
         ollama_base_port=ollama_base_port, planning_mode=planning_mode,
-        comm_strategy=comm_strategy,
+        agent_presets=agent_presets, capability_knowledge=capability_knowledge,
+        comm_strategies=comm_strategies
     )
 
     # Start overarching MATRX scripts and threads
