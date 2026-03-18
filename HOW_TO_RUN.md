@@ -28,6 +28,8 @@ Each agent needs its own Ollama instance. The EnginePlanner shares Terminal 1 wi
 # Terminal 1 (default port 11434 — used by EnginePlanner + Agent 0)
 ollama serve
 
+BASE_port = 11434 
+
 # Terminal 2 (port 11435 — used by Agent 1)
 OLLAMA_HOST=0.0.0.0:11435 ollama serve
 
