@@ -69,7 +69,7 @@ _AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 def add_agents(builder, condition, name, folder, agent_type='baseline',
                num_rescue_agents=1, include_human=True, ollama_base_port=11434,
                planning_mode='simple', agent_presets=None,
-               capability_knowledge='informed'):
+               capability_knowledge='informed', comm_strategies=None):
     """
     Add agents to the world.
 
@@ -93,6 +93,11 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
     # Extend or truncate to match num_rescue_agents
     while len(agent_presets) < num_rescue_agents:
         agent_presets.append(agent_presets[-1] if agent_presets else DEFAULT_PRESET)
+
+    if comm_strategies is None:
+        comm_strategies = ['always_respond'] * num_rescue_agents
+    while len(comm_strategies) < num_rescue_agents:
+        comm_strategies.append(comm_strategies[-1] if comm_strategies else 'always_respond')
 
     # Define the human's sense capabilities based on the selected condition
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
@@ -138,6 +143,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     api_base=agent_api_base,
                     capabilities=caps,
                     capability_knowledge=capability_knowledge,
+                    comm_strategy=comm_strategies[agent_nr],
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using MARBLE Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
@@ -251,7 +257,7 @@ def add_water(builder):
 def create_builder(condition, name, folder, agent_type='baseline',
                    num_rescue_agents=1, include_human=True, ollama_base_port=11434,
                    planning_mode='simple', agent_presets=None,
-                   capability_knowledge='informed'):
+                   capability_knowledge='informed', comm_strategies=None):
     # Set numpy's random generator
     np.random.seed(random_seed)
     # Create the collection goal
@@ -318,7 +324,8 @@ def create_builder(condition, name, folder, agent_type='baseline',
                         ollama_base_port=ollama_base_port,
                         planning_mode=planning_mode,
                         agent_presets=agent_presets,
-                        capability_knowledge=capability_knowledge)
+                        capability_knowledge=capability_knowledge,
+                        comm_strategies=comm_strategies)
     add_victims(builder)
     # add_obstacles(builder)
     add_decorative_objects(builder)

@@ -2,8 +2,9 @@ from typing import Dict, List, Any
 from agents1.modules.utils_prompting import to_toon
 
 
-REASONING_PROMPT = """Return tool calls to complete the tasks. Do not repeat action the same action if already taken recently.
+REASONING_PROMPT = """Return tool calls to complete the tasks. Do not repeat the same action if already taken recently.
 If a task is completed, move to next one. Do not keep returning actions to complete the same task.
+You may receive messages from other agents. You can respond using SendMessage. Sending a message uses your action for this tick.
 """
 
 
@@ -20,6 +21,8 @@ class ReasoningIO(ReasoningBase):
         memory = information.get('memory', '') or 'none'
         previous_action = information.get('previous_action', '')
 
+        messages = information.get('messages', [])
+
         info_dict: Dict[str, Any] = {
             "observation": observation,
             "tasks": task_decomposition,
@@ -28,6 +31,8 @@ class ReasoningIO(ReasoningBase):
         }
         if previous_action:
             info_dict["previous_action"] = previous_action
+        if messages:
+            info_dict["messages"] = messages
 
         return [
             {"role": "system", "content": REASONING_PROMPT},

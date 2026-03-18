@@ -29,6 +29,10 @@ if __name__ == "__main__":
     # Whether agents know their capabilities upfront or discover through failure
     capability_knowledge = 'informed'  # 'informed' | 'discovery'
 
+    # Communication strategies — one per agent (cycles if fewer than num_rescue_agents)
+    # Available: 'always_respond', 'busy_aware'
+    comm_strategies = ['always_respond', 'always_respond']
+
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
     manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
@@ -40,7 +44,8 @@ if __name__ == "__main__":
         condition=condition, name=name, agent_type=agent_type, folder=fld,
         num_rescue_agents=num_rescue_agents, include_human=include_human,
         ollama_base_port=ollama_base_port, planning_mode=planning_mode,
-        agent_presets=agent_presets, capability_knowledge=capability_knowledge
+        agent_presets=agent_presets, capability_knowledge=capability_knowledge,
+        comm_strategies=comm_strategies
     )
 
     # Start overarching MATRX scripts and threads

@@ -187,13 +187,16 @@ def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
     return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
 
 @tool
-def SendMessage(message: str, send_to: str):
-    """Send a message to one or all teammates. Can be a question, help request or an answer to another agent's question.
+def SendMessage(message: str, send_to: str, message_type: str = "message"):
+    """Send a message to one or all teammates. This uses your action for this tick.
+
     Args:
-        message: A string with the message to be sent.
-        send_to: Can be the name of a specific agent, or "all" if the message should be broadcasted to all.
+        message: The message content to send.
+        send_to: Agent name for directed message, or "all" for broadcast.
+        message_type: One of: ask_help (expects reply), help (response to ask_help), message (general).
     """
-    return 'SendMessage', {'message': message}, {'send_to': send_to}
+    return 'SendMessage', {'message': message, 'send_to': send_to,
+        'message_type': message_type}, {'task_completing': f"sending {message_type} message"}
 
 
 # Ordered list of every action tool — used to build the registry + LLM schemas.

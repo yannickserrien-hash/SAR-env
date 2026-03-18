@@ -49,6 +49,7 @@ from matrx.actions.object_actions import RemoveObject as _RemoveObject
 
 from agents1.action_mapper import ActionMapper
 from agents1.async_model_prompting import get_llm_result, submit_llm_call
+from agents1.modules.communication_module import CommunicationModule
 from agents1.modules.execution_module import execute_action
 from agents1.modules.perception_module import Perception
 from agents1.modules.planning_module import Planning
@@ -109,6 +110,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         api_base: Optional[str] = None,
         capabilities: Optional[Dict] = None,
         capability_knowledge: str = 'informed',
+        comm_strategy: str = 'always_respond',
     ) -> None:
         super().__init__(slowdown, condition, name, folder)
 
@@ -121,6 +123,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # ── Capabilities ──────────────────────────────────────────────────
         self._capabilities = capabilities
         self._capability_knowledge = capability_knowledge
+
+        # ── Communication ─────────────────────────────────────────────────
+        self._comm_strategy = comm_strategy
 
         # ── Memory ─────────────────────────────────────────────────────────
         self.memory = BaseMemory()
@@ -167,6 +172,12 @@ class LLMAgentBase(ArtificialBrain, Perception):
             algorithm=Navigator.A_STAR_ALGORITHM,
         )
         self.init_global_state()
+        self.comm = CommunicationModule(
+            agent_id=self.agent_id,
+            strategy=self._comm_strategy,
+            llm_model=self._llm_model,
+            api_base=self._api_base,
+        )
         logger.info('[%s] LLMAgentBase ready (model=%s)', self.agent_id, self._llm_model)
 
     # ── Default perception filter ─────────────────────────────────────────
@@ -252,6 +263,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
         self.process_observations(filtered_state)
+        self.comm.process_messages(self.received_messages)
 
     def _run_preamble(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
         """Handle all infrastructure concerns before the agent's reasoning step.
@@ -430,6 +442,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
             self.planner.advance_task(action_name)
             self.memory.update('action', {'action': action_name, 'args': kwargs})
             self._maybe_share_observation(filtered_state, action_name, kwargs)
+            comm_result = self._apply_communication(action_name, kwargs)
+            if comm_result is not None:
+                return comm_result
             return self._apply_navigation(action_name, kwargs)
 
         # ── Path B: plain-text JSON fallback ──────────────────────────────
@@ -450,6 +465,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self.planner.advance_task(action_name)
         self.memory.update('action', {'action': action_name, 'args': kwargs})
         self._maybe_share_observation(filtered_state, action_name, kwargs)
+        comm_result = self._apply_communication(action_name, kwargs)
+        if comm_result is not None:
+            return comm_result
         return self._apply_navigation(action_name, kwargs)
 
     def _apply_navigation(
@@ -476,15 +494,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
             move = self._navigator.get_move_action(self._state_tracker)
             return (move, {}) if move else self._idle()
 
-        if action_name == 'SendMessage':
-            send_to = kwargs.get('send_to', '')
-            target = None if 'all' in send_to else send_to
-            self._send_message(
-                content=kwargs.get('message', ''),
-                sender=self.agent_id,
-                target_id=target,
-            )
-
         if action_name == _CarryObjectTogether.__name__:
             self._pending_carry_kwargs = dict(kwargs)
             self._carry_wait_ticks = 0
@@ -492,6 +501,35 @@ class LLMAgentBase(ArtificialBrain, Perception):
             return action_name, kwargs
 
         return action_name, kwargs
+
+    def _apply_communication(
+        self, action_name: str, kwargs: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict]]:
+        """Handle SendMessage actions. Returns Idle if sent, None if not SendMessage."""
+        if action_name != 'SendMessage':
+            return None
+
+        send_to = kwargs.get('send_to', '')
+        message_type = kwargs.get('message_type', 'message')
+        text = kwargs.get('message', '')
+
+        # Build structured content and send via MATRX
+        target = None if send_to == 'all' else send_to
+        content = {'message_type': message_type, 'text': text}
+        msg = Message(content=content, from_id=self.agent_id, to_id=target)
+        self.send_message(msg)
+
+        # Auto-announce: if private 'help' reply to someone who asked, broadcast
+        if message_type == 'help' and target is not None:
+            if self.comm.has_pending_ask_help(from_agent=send_to):
+                ann = {
+                    'message_type': 'message',
+                    'text': f'{self.agent_id} is responding to {send_to} help request',
+                }
+                self.send_message(Message(content=ann, from_id=self.agent_id, to_id=None))
+
+        self._reasoning_step = True
+        return self._idle()
 
     # ── Action validation ─────────────────────────────────────────────────
 

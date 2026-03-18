@@ -52,6 +52,7 @@ class SearchRescueAgent(LLMAgentBase):
         api_base: Optional[str] = None,
         capabilities: Optional[Dict] = None,
         capability_knowledge: str = 'informed',
+        comm_strategy: str = 'always_respond',
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -65,6 +66,7 @@ class SearchRescueAgent(LLMAgentBase):
             api_base=api_base,
             capabilities=capabilities,
             capability_knowledge=capability_knowledge,
+            comm_strategy=comm_strategy,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
         self.tools_by_name, self.tool_schemas = build_tool_schemas()
@@ -120,6 +122,7 @@ class SearchRescueAgent(LLMAgentBase):
                 'observation': observation,
                 'feedback': self._action_feedback,
                 'memory': self.memory.retrieve_all()[-15:],
+                'messages': self.comm.get_messages_for_prompt(limit=10),
             })
 
             # Inject capability info and tailored game rules into system prompt

@@ -146,35 +146,83 @@ agent = SearchRescueAgent(
 
 ---
 
-## 5. Communication System (Hybrid)
+## 5. Communication System
 
-Agents communicate via MATRX Messages with LLM-generated content and typed message tags.
+Agents communicate via MATRX Messages with LLM-generated content and typed message tags. Sending a message counts as the agent's action for that tick (the agent cannot also move or perform another action). The `CommunicationModule` follows the `Perception` module pattern — environment-sided, processing inbound messages into structured data for prompts.
 
 ### 5.1 Message Types
 
 | Tag | Purpose | Example |
 |-----|---------|---------|
-| `ask_help` | Request cooperative action from another agent | "I found a critically injured victim at (10,3). Can you come help carry?" |
-| `share_info` | Share discovered information | "Area 2 has a critically injured girl at (10,3)" |
-| `request_task` | Ask planner/agent for a new task | "My current task is complete. What should I do next?" |
-| `task_update` | Report progress on current task | "Cleared obstacle at (9,4). Entering area 2 now." |
-| `reply` | Response to a private message | "On my way to (10,3) to help carry." |
+| `ask_help` | Request cooperation, information, or anything that expects a reply | "I found a critically injured victim at (10,3). Can you come help carry?" |
+| `help` | Response to an `ask_help` message | "On my way to (10,3) to help carry." |
+| `message` | General purpose (sharing info, status updates, anything else) | "Area 2 has a critically injured girl at (10,3)" |
 
-### 5.2 Addressing
+### 5.2 Message Content Format
 
-- **Broadcast** (`send_to: "all"`): Message goes to all agents.
+Messages use MATRX's `Message(content, from_id, to_id)`. The `content` field is a structured dict:
+
+```python
+{"message_type": "ask_help", "text": "Need help carrying victim at (5,3)"}
+```
+
+MATRX provides `from_id`, `to_id`, and `message_id` natively on the `Message` object. No separate message_id tracking is needed — LLMs cannot reliably reference message IDs. Agents see the 10 most recent messages + an LLM-generated summary of older ones.
+
+### 5.3 Addressing
+
+- **Broadcast** (`send_to: "all"`): Message goes to all agents (`to_id=None` in MATRX).
 - **Direct/Private** (`send_to: "RescueBot1"`): Message goes to a specific agent.
 
-### 5.3 Message Handling Rules
+### 5.4 Message Handling
 
-- **Private message received** → Triggers a priority LLM call to generate a reply. The agent responds before continuing its current task. The reply LLM call is async (non-blocking).
-- **Broadcast message received** → Included in the agent's next observation context. The LLM decides whether to prioritize replying or continue with the current task. No forced interruption.
+Messages are included in the agent's reasoning prompt alongside observations, tasks, feedback, and memory. The LLM decides whether to respond (via `SendMessage` tool) or continue its current task. No forced interruption or priority queue.
 
-### 5.4 Existing Code
+**Auto-announce**: When an agent sends a private `help` reply to someone who sent an `ask_help`, a broadcast announcement is automatically sent (e.g., "RescueBot0 is responding to RescueBot1 help request") so other agents don't redundantly help.
 
-- `agents1/tool_registry.py` → `SendMessage` tool (lines 188-194): Already supports `send_to` targeting
-- `agents1/modules/CommunicationModule.py` (in graveyard): Has templates and message log — can be revived and adapted
-- `matrx/messages/message.py` → MATRX `Message` class with `to_id` field
+**NOT_SURE: Private message priority reply** — The spec previously described private messages triggering a priority LLM call that interrupts the current task. This is NOT implemented. All messages (private and broadcast) are simply included in the next reasoning prompt. The LLM decides naturally. Implementing priority interruption would require a separate LLM call path in `_run_preamble()` that checks for new private messages before the normal reasoning step.
+
+### 5.5 Communication Strategies (Per-Agent, Configurable)
+
+Strategies control which messages appear in the LLM prompt. Configured per-agent in `main.py` via `comm_strategies` list.
+
+| Strategy | Behavior |
+|----------|----------|
+| `always_respond` (default) | All messages included in prompt. LLM decides what to do. |
+| `busy_aware` | When agent is busy (navigating, carrying), only `ask_help` messages are shown. When idle, all messages shown. |
+
+**NOT_SURE: BusyAware "busy" detection** — The `BusyAwareStrategy.filter_for_prompt()` accepts an `agent_busy` parameter, but `SearchRescueAgent` currently always passes `agent_busy=False` (the default). To fully enable this strategy, the agent needs to pass its actual busy state (e.g., `self._pending_carry_kwargs is not None or self._nav_target is not None`). This is a small wiring change but is not yet done.
+
+### 5.6 Async Message History Summarization
+
+When the message inbox exceeds a threshold (default: 10), the `CommunicationModule` submits an async LLM call via `submit_llm_call()` to summarize the older messages. This is non-blocking — the summary `Future` is polled each tick in `process_messages()`. Until the summary completes, only the most recent messages are shown. Once done, the summary text is prepended to the prompt as context.
+
+### 5.7 Implementation — COMPLETED
+
+| Feature | Status | Code |
+|---------|--------|------|
+| CommunicationModule (environment-sided) | Done | `agents1/modules/communication_module.py` — `CommunicationModule` class, processes inbound MATRX messages |
+| Communication strategies | Done | `agents1/modules/communication_module.py` — `AlwaysRespondStrategy`, `BusyAwareStrategy`, strategy base class `CommStrategy` |
+| SendMessage tool with message_type | Done | `agents1/tool_registry.py` — `SendMessage(message, send_to, message_type)` with 3 types: ask_help, help, message |
+| Message dispatch | Done | `agents1/modules/execution_module.py` — passes `message_type` through |
+| Messages in reasoning prompt | Done | `agents1/modules/reasoning_module.py` — `messages` key in `info_dict`, system prompt mentions communication |
+| Separate `_apply_communication()` | Done | `agents1/llm_agent_base.py` — handles SendMessage actions, returns Idle (sending = 1 tick), auto-announce logic |
+| SendMessage bug fix | Done | `agents1/llm_agent_base.py` — removed SendMessage from `_apply_navigation()` (was passing invalid action name to MATRX) |
+| Inbound message processing | Done | `agents1/llm_agent_base.py` — `_tick_setup()` calls `self.comm.process_messages(self.received_messages)` |
+| CommunicationModule init | Done | `agents1/llm_agent_base.py` — `initialize()` creates `CommunicationModule` with agent's LLM model/api_base |
+| Async message summarization | Done | `agents1/modules/communication_module.py` — `_maybe_summarize()` + `_poll_summary()` via `submit_llm_call()`/`get_llm_result()` |
+| Auto-announce commitments | Done | `agents1/llm_agent_base.py` — `_apply_communication()` broadcasts when private `help` reply to `ask_help` |
+| Per-agent comm_strategy config | Done | `main.py` → `WorldBuilder.py` → `SearchRescueAgent` → `LLMAgentBase` → `CommunicationModule` |
+| Module init fix | Done | `agents1/modules/__init__.py` — fixed dead import, now imports from `communication_module` |
+| Old CommunicationModule replaced | Done | `agents1/modules/CommunicationModule.py` deleted, replaced by `communication_module.py` |
+
+### 5.8 NOT_SURE Items (Not Yet Implemented)
+
+| Item | Description | What's Needed |
+|------|-------------|---------------|
+| Private message priority reply | Spec Section 5.3 originally described private messages triggering an immediate priority LLM call. Currently all messages just appear in the next prompt. | Add a check in `_run_preamble()` for new private messages → submit a separate priority LLM call before normal reasoning. |
+| BusyAware busy state wiring | `BusyAwareStrategy` exists but `agent_busy` is always `False`. | Pass actual busy state from `SearchRescueAgent` to `get_messages_for_prompt(agent_busy=...)` based on nav/carry state. |
+| Event-driven scheduling (spec 5.4 pseudocode) | The original spec had tick-delayed response scheduling based on both agents' busy states. | Not implemented. Current approach: LLM sees messages and decides. Could add tick-delay buffer in `CommunicationModule` if needed. |
+| Multi-turn conversation loop | Spec Section 5.4 `handle_message` described a loop of LLM calls until a non-command response. | Not implemented. Each tick the LLM makes one decision (act or communicate). No multi-turn within a tick. |
 
 ---
 
@@ -208,7 +256,7 @@ As agents explore, they accumulate a persistent world model:
 ```
 
 - **Private by default**: Each agent has their own WORLD_STATE_GLOBAL. It is NOT shared automatically.
-- **Shared on request**: Agents can share information via `share_info` messages when asked by other agents.
+- **Shared on request**: Agents can share information via `message` messages when asked by other agents.
 
 ### 6.3 Async Staleness
 
@@ -360,22 +408,25 @@ Configurable verbosity with 3 levels.
 | LongTermMemory | *(deleted)* | **Deleted** — unused, had MARBLE imports. Re-implement when needed without MARBLE deps. |
 | SharedMemory | `memory/shared_memory.py` | Done |
 | BaseMemory (simple list) | `memory/base_memory.py` | Done (currently used in production) |
-| Tool registry | `agents1/tool_registry.py` | Done — needs capability-aware descriptions |
-| Custom actions | `actions1/CustomActions.py` | Done — needs capability enforcement, CarryTogether redesign |
+| Tool registry | `agents1/tool_registry.py` | **Done** — capability-aware, SendMessage has message_type |
+| Custom actions | `actions1/CustomActions.py` | Done — capability enforcement done, CarryTogether redesign pending |
 | Action validators | `agents1/llm_agent_base.py` | Partial — needs to move to environment layer |
-| Communication module | `agents1/modules/CommunicationModule.py` | In graveyard — needs revival and integration |
+| Communication module | `agents1/modules/communication_module.py` | **Done** — environment-sided CommunicationModule with strategies, async summarization, auto-announce |
+| Communication strategies | `agents1/modules/communication_module.py` | **Done** — AlwaysRespond + BusyAware, per-agent config |
+| SendMessage dispatch | `agents1/llm_agent_base.py` | **Done** — `_apply_communication()` handles outbound, returns Idle |
+| Messages in reasoning prompt | `agents1/modules/reasoning_module.py` | **Done** — messages key in prompt info_dict |
 | WORLD_STATE_GLOBAL | `agents1/modules/perception_module.py` | Done |
-| Agent capability system | — | **Missing entirely** |
-| Capability presets | — | **Missing entirely** |
+| Agent capability system | `agents1/capabilities.py` | **Done** — presets, resolver, prompt generator, tool filter, game rules |
+| Capability presets | `agents1/capabilities.py` | **Done** — scout, medic, heavy_lifter, generalist |
 | Engine Partial mode | — | **Missing** |
 | Engine None mode | — | **Missing** |
 | Human chat panel | — | **Missing** |
 | Task override UI | — | **Missing** |
 | Configurable logging | — | **Missing** (only ActionLogger CSV exists) |
-| Per-agent vision range | `worlds1/WorldBuilder.py` | Hardcoded (agent_sense_range=2 for all) — needs to be per-agent |
-| Speed delays | — | **Missing** |
-| Strength/Medical enforcement | — | **Missing** |
-| Private message priority reply | — | **Missing** |
+| Per-agent vision range | `worlds1/WorldBuilder.py` | **Done** — per-agent `SenseCapability` from `caps['vision']` |
+| Speed delays | `brains1/ArtificialBrain.py` | **Done** — `decide_on_action()` adds `action_duration=3` for slow agents |
+| Strength/Medical enforcement | `actions1/CustomActions.py`, `brains1/ArtificialBrain.py` | **Done** — medical in `CarryObject.is_possible()`, strength in `decide_on_action()` |
+| Private message priority reply | — | **NOT_SURE** — not implemented. Messages included in prompt, LLM decides naturally. See Section 5.8. |
 | CarryTogether lock + auto-navigate | `actions1/CustomActions.py` | Partial — current impl has retry loop, not lock + auto-navigate |
 | TOON at prompt time only | `agents1/modules/utils_prompting.py` | Done (already converts dicts at prompt construction) |
 | Headless mode | `main.py` | Not implemented (visualizer always starts) |
