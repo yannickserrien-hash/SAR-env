@@ -33,6 +33,10 @@ if __name__ == "__main__":
     # Available: 'always_respond', 'busy_aware'
     comm_strategies = ['always_respond', 'always_respond']
 
+    # World preset: 'static' (current world), 'preset2' (2 houses), 'preset3' (2 big houses), 'random'
+    world_preset = 'static'
+    world_seed = None            # int for reproducibility, None for random each run
+
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
     manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
@@ -40,12 +44,13 @@ if __name__ == "__main__":
     # Scale LLM thread pool for the number of agents
     init_marble_pool(num_rescue_agents)
 
-    builder, agents = create_builder(
+    builder, agents, total_victims = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,
         num_rescue_agents=num_rescue_agents, include_human=include_human,
         ollama_base_port=ollama_base_port, planning_mode=planning_mode,
         agent_presets=agent_presets, capability_knowledge=capability_knowledge,
-        comm_strategies=comm_strategies
+        comm_strategies=comm_strategies,
+        world_preset=world_preset, world_seed=world_seed,
     )
 
     # Start overarching MATRX scripts and threads
@@ -66,7 +71,7 @@ if __name__ == "__main__":
             'score': 0,
             'block_hit_rate': 0.0,
             'victims_rescued': 0,
-            'total_victims': 8
+            'total_victims': total_victims
         }, f, indent=2)
 
     # Initialize EnginePlanner with LLM

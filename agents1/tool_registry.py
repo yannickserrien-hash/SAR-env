@@ -40,17 +40,26 @@ REASONING_STRATEGIES: Dict[str, str] = {
     ),
 }
 
-# Static fallback game rules (used when capabilities module is not available).
-# For capability-aware rules, use agents1.capabilities.get_game_rules(caps).
-GAME_RULES = (
-    "Rules:\n"
-    "- Critically injured victims require CarryObjectTogether (both agents).\n"
-    "- Big grey rocks require RemoveObjectTogether (both agents).\n"
-    "- Trees can only be removed by the rescue robot (RemoveObject).\n"
-    "- Small stones can be removed solo (RemoveObject).\n"
-    "- Deliver rescued victims to the drop zone at (23, 8).\n"
-    "- You can only carry one victim at a time."
-)
+# Default drop zone location (overridden by env_info at runtime).
+_DEFAULT_DROP_ZONE = (23, 8)
+
+
+def get_game_rules_str(drop_zone=None):
+    """Static fallback game rules. For capability-aware rules, use agents1.capabilities.get_game_rules()."""
+    dz = drop_zone or _DEFAULT_DROP_ZONE
+    return (
+        "Rules:\n"
+        f"- Critically injured victims require CarryObjectTogether (both agents).\n"
+        "- Big grey rocks require RemoveObjectTogether (both agents).\n"
+        "- Trees can only be removed by the rescue robot (RemoveObject).\n"
+        "- Small stones can be removed solo (RemoveObject).\n"
+        f"- Deliver rescued victims to the drop zone at {dz}.\n"
+        "- You can only carry one victim at a time."
+    )
+
+
+# Static fallback (backward compatibility)
+GAME_RULES = get_game_rules_str()
 
 # ── Action tools ──────────────────────────────────────────────────────────────
 # Defined at module level so they don't shadow the aliased MATRX action-class
@@ -115,7 +124,7 @@ def MoveToArea(area: int, task_completing: str):
 
 @tool
 def NavigateToDropZone(task_completing: str = "navigating to drop zone"):
-    """Navigate to the rescue drop zone at grid position (23, 8) to deliver a carried victim."""
+    """Navigate to the rescue drop zone to deliver a carried victim."""
     return 'NavigateToDropZone', {'task_completing': task_completing}
 
 

@@ -119,6 +119,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         # ── Environment info ─────────────────────────────────────────────
         self.env_info: EnvironmentInformation = env_info or EnvironmentInformation()
+        # Update Perception mixin's drop zone from env_info
+        Perception.set_drop_zone(self.env_info.drop_zone)
 
         # ── Capabilities ──────────────────────────────────────────────────
         self._capabilities = capabilities
@@ -335,7 +337,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         obj_id = self._pending_carry_kwargs.get('object_id', '')
         nearby_ids = (
-            {o['id'] for o in self.WORLD_STATE.get('current_observation', [])}
+            {o['id'] for o in self.WORLD_STATE.get('victims', []) + self.WORLD_STATE.get('obstacles', [])}
             if isinstance(self.WORLD_STATE, dict) else set()
         )
 
@@ -345,7 +347,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             print(f"[{self.agent_id}] Carry grabbed — entering autopilot to drop zone")
             self._pending_carry_kwargs = None
             self._carry_wait_ticks = 0
-            dest = (23, 8)
+            dest = self.env_info.drop_zone
             self._carry_autopilot = {
                 'victim_id': obj_id,
                 'destination': dest,
@@ -676,7 +678,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             return (move, {}) if move else self._idle()
 
         if action_name == 'NavigateToDropZone':
-            coords = (23, 8)
+            coords = self.env_info.drop_zone
             self._navigator.reset_full()
             self._navigator.add_waypoints([coords])
             self._nav_target = coords

@@ -1,12 +1,17 @@
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class Perception:
     """Converts a filtered MATRX WorldState dict to an LLM-friendly dict
     that can be passed to to_toon() for token-efficient prompting."""
 
-    # Drop zone coordinates (matches WorldBuilder.py)
+    # Default drop zone coordinates (overridden via set_drop_zone at agent init)
     DROP_ZONE_LOCATION: Tuple[int, int] = (23, 8)
+
+    @classmethod
+    def set_drop_zone(cls, location: Tuple[int, int]):
+        """Update the drop zone location (called once at agent init from env_info)."""
+        cls.DROP_ZONE_LOCATION = location
 
     def percept_state(
         self,
@@ -27,9 +32,12 @@ class Perception:
         # Extract plain teammate IDs for object classification.
         teammate_ids: set = {t[0] for t in teammates} if teammates else set()
 
+        victims, obstacles, walls = self._serialize_nearby(state, agent_id, teammate_ids)
         result = {
             "agent": self._serialize_agent(state, agent_id),
-            "current_observation": self._serialize_nearby(state, agent_id, teammate_ids),
+            "victims": victims,
+            "obstacles": obstacles,
+            "walls": walls,
             "teammates": [
                 {"id": t[0], "x": int(t[1][0]), "y": int(t[1][1])}
                 for t in teammates
@@ -60,11 +68,16 @@ class Perception:
         state: Dict[str, Any],
         agent_id: str,
         teammate_ids: set,
-    ) -> List[Dict[str, Any]]:
-        """Extract all interesting nearby objects."""
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[List[int]]]:
+        """Extract all interesting nearby objects.
+
+        Returns:
+            (victims, obstacles, walls) — three separate lists.
+        """
         skip = {agent_id, 'World'}
-        objects: List[Dict[str, Any]] = []
-        walls = {"walls": []}
+        victims: List[Dict[str, Any]] = []
+        obstacles: List[Dict[str, Any]] = []
+        walls: List[List[int]] = []
 
         for obj_id, obj_data in state.items():
             if obj_id in skip:
@@ -81,34 +94,35 @@ class Perception:
 
             if obj_type == 'door':
                 continue
-            #     obj_id = str(obj_id).split('_-_door')[0] if '_-_door' in str(obj_id) else str(obj_id)
 
             if 'wall' in obj_type:
-                walls['walls'].append([int(c) for c in loc])
+                walls.append([int(c) for c in loc])
                 continue
 
-            entry: Dict[str, Any] = {
-                "id": obj_id,
-                "type": obj_type,
-                # Convert MATRX tuples (x, y) to lists so TOON renders
-                # them as  location[2]: x,y  instead of "(x, y)".
-                "location": [int(c) for c in loc],
-            }
+            pos = [int(c) for c in loc]
 
-            # Add severity for victims so the LLM knows if coop carry is needed
             if obj_type == 'victim':
                 img = str(obj_data.get('img_name', '')).lower()
                 if 'critical' in img:
-                    entry["severity"] = "critical"
+                    severity = "critical"
                 elif 'mild' in img:
-                    entry["severity"] = "mild"
+                    severity = "mild"
                 else:
-                    entry["severity"] = "healthy"
+                    severity = "healthy"
+                victims.append({
+                    "id": obj_id,
+                    "type": obj_type,
+                    "location": pos,
+                    "severity": severity,
+                })
+            elif obj_type in ('rock', 'stone', 'tree'):
+                obstacles.append({
+                    "id": obj_id,
+                    "type": obj_type,
+                    "location": pos,
+                })
 
-            objects.append(entry)
-        objects.append(walls)
-
-        return objects
+        return victims, obstacles, walls
 
     def _classify_type(
         self,

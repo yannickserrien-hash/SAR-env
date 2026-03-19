@@ -231,9 +231,9 @@ class SearchRescueAgent(LLMAgentBase):
             'previous_tasks': self.memory.retrieve_all()[-5:],
             'other_agents_tasks': None,
             'position': self.WORLD_STATE.get('agent', {}).get('location'),
-            'nearby_objects': self.WORLD_STATE.get('current_observation', []),
+            'nearby_objects': self.WORLD_STATE.get('victims', []) + self.WORLD_STATE.get('obstacles', []),
             'observed_objects': self.WORLD_STATE_GLOBAL,
-            'carrying': self.WORLD_STATE.get('agent', {}).get('is_carrying'),
+            'carrying': self.WORLD_STATE.get('agent', {}).get('carrying'),
             'rescued_victims': None,
             'critic_feedback': self._pipeline_context.get('critic_result'),
         }
@@ -302,10 +302,10 @@ class SearchRescueAgent(LLMAgentBase):
         # Inject capability info and game rules
         if self._capabilities and self._capability_knowledge == 'informed':
             cap_text = get_capability_prompt(self._capabilities)
-            rules_text = get_game_rules(self._capabilities)
+            rules_text = get_game_rules(self._capabilities, drop_zone=self.env_info.drop_zone)
             prompt[0]['content'] += f"\n\n{cap_text}\n\n{rules_text}"
         else:
-            rules_text = get_game_rules()
+            rules_text = get_game_rules(drop_zone=self.env_info.drop_zone)
             prompt[0]['content'] += f"\n\n{rules_text}"
 
         print(f'[{self.agent_id}] Pipeline: REASONING — choosing action')

@@ -160,11 +160,12 @@ def filter_tools_for_capabilities(
     return filtered_tools_by_name, filtered_schemas
 
 
-def get_game_rules(capabilities: Dict[str, Any] = None) -> str:
+def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=None) -> str:
     """Return game rules string, optionally tailored to agent capabilities."""
+    dz = drop_zone or (23, 8)
     base_rules = [
         "Rules:",
-        "- Deliver rescued victims to the drop zone at (23, 8).",
+        f"- Deliver rescued victims to the drop zone at {dz}.",
         "- You can only carry one victim at a time.",
     ]
 
