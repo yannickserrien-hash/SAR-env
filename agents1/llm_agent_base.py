@@ -54,6 +54,7 @@ from agents1.modules.communication_module import CommunicationModule
 from agents1.modules.execution_module import execute_action
 from agents1.modules.perception_module import Perception
 from agents1.modules.planning_module import Planning
+from agents1.modules.validator_module import ActionValidator
 from brains1.ArtificialBrain import ArtificialBrain
 from memory.base_memory import BaseMemory
 from memory.shared_memory import SharedMemory
@@ -84,19 +85,11 @@ class LLMAgentBase(ArtificialBrain, Perception):
                         ``'dag'`` (task graph with conditional branching).
     """
 
-    # ── Actions that require a valid, in-range object_id ──────────────────
-    _OBJECT_ACTIONS = frozenset({
-        'CarryObject', 'CarryObjectTogether',
-        'RemoveObject', 'RemoveObjectTogether',
-    })
-
     # ── Actions skipped for MATRX feasibility check ───────────────────────
     _SKIP_MATRX_CHECK = frozenset({
-        'Idle', 'MoveTo', 'NavigateToDropZone', 'Drop'
+        'Idle', 'MoveTo', 'NavigateToDropZone', 'Drop',
         'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest', 'SendMessage',
     })
-    
-    _OBJECT_TYPES = frozenset({"victim", "tree", "rock", "stone"})
 
     # ── Constructor ───────────────────────────────────────────────────────
 
@@ -130,6 +123,12 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # ── Capabilities ──────────────────────────────────────────────────
         self._capabilities = capabilities
         self._capability_knowledge = capability_knowledge
+
+        # ── Action validator ──────────────────────────────────────────────
+        self._validator = ActionValidator(
+            capabilities=capabilities,
+            capability_knowledge=capability_knowledge,
+        )
 
         # ── Communication ─────────────────────────────────────────────────
         self._comm_strategy = comm_strategy
@@ -707,29 +706,11 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 return ('MoveSouth', {})
 
         if action_name == _CarryObjectTogether.__name__:
-            obj_id = kwargs.get('object_id', '')
-            if self._is_teammate_adjacent_to_object(obj_id):
-                # Teammate adjacent — enter carry retry loop
-                self._pending_carry_kwargs = dict(kwargs)
-                self._carry_wait_ticks = 0
-                self._reasoning_step = False
-                return action_name, kwargs
-            else:
-                # No teammate adjacent — fail gracefully, return to pipeline
-                self.memory.update('action_failure', {
-                    'victim_id': obj_id,
-                    'action': 'CarryObjectTogether',
-                    'feedback': (
-                        f"CarryObjectTogether failed: no teammate is adjacent to "
-                        f"victim '{obj_id}'. Ask a teammate for help using "
-                        f"SendMessage(message_type='ask_help'), then wait for "
-                        f"them to arrive before retrying."
-                    ),
-                })
-                print(f'[{self.agent_id}] CarryObjectTogether pre-check failed: '
-                      f'no teammate adjacent to {obj_id}')
-                self._reasoning_step = True
-                return self._idle()
+            # Teammate adjacency already validated by ActionValidator
+            self._pending_carry_kwargs = dict(kwargs)
+            self._carry_wait_ticks = 0
+            self._reasoning_step = False
+            return action_name, kwargs
 
         return action_name, kwargs
 
@@ -776,76 +757,23 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._reasoning_step = True
         return self._idle()
 
-    # ── Cooperative carry helpers ─────────────────────────────────────────
-
-    def _is_teammate_adjacent_to_object(self, object_id: str) -> bool:
-        """Check if any teammate is within Chebyshev distance 1 of the object."""
-        nearby = (
-            self.WORLD_STATE.get('current_observation', [])
-            if isinstance(self.WORLD_STATE, dict) else []
-        )
-        obj_loc = None
-        for o in nearby:
-            if o.get('id') == object_id:
-                obj_loc = o.get('location')
-                break
-        if obj_loc is None:
-            return False
-        for _tid, t_loc in self.teammates:
-            if _tid == self.agent_id:
-                continue
-            if self._is_within_range(tuple(t_loc), tuple(obj_loc), radius=1):
-                return True
-        return False
-
     # ── Action validation ─────────────────────────────────────────────────
 
     def _validate_action(
         self, name: str, args: Dict[str, Any]
     ) -> Optional[Tuple[str, Dict]]:
-        """Validate object_id against the current WORLD_STATE before dispatching.
+        """Validate an action before dispatching to MATRX.
 
-        Returns ``None`` when valid. Returns an Idle tuple on failure and
-        populates ``_action_feedback`` for the next LLM prompt.
+        Delegates to :class:`ActionValidator` which checks every action type.
+        Returns ``None`` when valid.  Returns an Idle tuple on failure and
+        populates memory with an ``action_failure`` entry for the next LLM prompt.
         """
-        if name not in self._OBJECT_ACTIONS:
+        result = self._validator.validate(name, args, self.WORLD_STATE, self.teammates)
+        if result.valid:
             return None
-
-        obj_id = args.get('object_id', '')
-        nearby = (
-            self.WORLD_STATE.get('current_observation', [])
-            if isinstance(self.WORLD_STATE, dict) else []
-        )
-        nearby_summary = ', '.join(
-            f"{o['id']} ({o['type']}"
-            + (f", {o.get('severity')}" if o.get('severity') else '')
-            + f" at {o['location']})"
-            for o in nearby if o.get('type') in self._OBJECT_TYPES
-        ) or 'none'
-        agent_loc = (
-            self.WORLD_STATE.get('agent', {}).get('location', 'unknown')
-            if isinstance(self.WORLD_STATE, dict) else 'unknown'
-        )
-
-        if not obj_id:
-            self.memory.update("action_failure", (
-                f'Action {name} requires an object_id but none was provided. '
-                f'Nearby actionable objects: [{nearby_summary}]. '
-            ))
-
-            self._reasoning_step = True
-            return self._idle()
-
-        nearby_ids = {o['id'] for o in nearby}
-        if obj_id not in nearby_ids:
-            self.memory.update("action_failure", (
-                f"Action {name} failed: object '{obj_id}' is not within reach "
-                f'Nearby actionable objects: [{nearby_summary}]. '
-                f'Move closer to the target or choose a different object.'
-            ))
-            self._reasoning_step = True
-            return self._idle()
-        return None
+        self.memory.update("action_failure", result.feedback)
+        self._reasoning_step = True
+        return self._idle()
 
     # ── LLM submission ────────────────────────────────────────────────────
 

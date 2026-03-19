@@ -376,8 +376,8 @@ class CarryObject(Action):
         if object_id and 'critical' in object_id:
             if medical != 'high':
                 return GrabObjectResult(
-                    "Critically injured victims require high medical skill or "
-                    "cooperative carry (CarryObjectTogether).", False
+                    "The action failed. You may not have the required ability "
+                    "to carry this victim alone.", False
                 )
 
         return _is_possible_grab(grid_world, agent_id=agent_id, object_id=object_id, grab_range=grab_range,

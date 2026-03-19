@@ -645,9 +645,19 @@ class ArtificialBrain(ArtificialAgentBrain, ABC):
             obj_id = params['object_id']
             if strength == 'low' and ('stone' in obj_id or 'rock' in obj_id):
                 print(f"[{self.agent_id}] Strength too low to remove '{obj_id}'")
+                if hasattr(self, 'memory'):
+                    self.memory.update('action_failure',
+                        f"RemoveObject failed on '{obj_id}'. "
+                        f"You may lack the ability to do this alone. "
+                        f"Consider asking a teammate for help.")
                 return 'Idle', {'duration_in_ticks': 1}
             if strength == 'medium' and 'rock' in obj_id:
                 print(f"[{self.agent_id}] Strength too low to remove rock '{obj_id}' solo")
+                if hasattr(self, 'memory'):
+                    self.memory.update('action_failure',
+                        f"RemoveObject failed on '{obj_id}'. "
+                        f"You may lack the ability to do this alone. "
+                        f"Consider asking a teammate for help.")
                 return 'Idle', {'duration_in_ticks': 1}
 
         # define duration to remove stone object by agent only
