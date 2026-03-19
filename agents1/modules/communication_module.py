@@ -17,6 +17,22 @@ logger = logging.getLogger('CommunicationModule')
 
 VALID_MESSAGE_TYPES = frozenset({'ask_help', 'help', 'message'})
 
+_COMMUNICATION_PROMPT = """You are a communication processor for a Search and Rescue agent team.
+Extract actionable information from the following inter-agent messages.
+
+Respond in JSON format:
+{
+    "discovered_victims": [{"id": "...", "location": [x,y], "severity": "..."}],
+    "discovered_obstacles": [{"id": "...", "location": [x,y], "type": "..."}],
+    "help_requests": [{"from": "agent_id", "task": "...", "location": [x,y]}],
+    "explored_areas": [{"area": "area N", "by": "agent_id", "status": "complete|partial"}],
+    "teammate_updates": [{"agent": "agent_id", "status": "...", "location": [x,y]}],
+    "summary": "Brief one-sentence summary of key information"
+}
+
+Only include fields that have actual data. If nothing relevant, return {"summary": "No actionable information"}.
+Ensure the response can be parsed by Python `json.loads`."""
+
 
 # ── Strategies ────────────────────────────────────────────────────────────────
 
@@ -222,6 +238,22 @@ class CommunicationModule:
             })
         result.extend(recent)
         return result
+
+    # ── Communication stage prompt ───────────────────────────────────────
+
+    def get_communication_prompt(self, messages: list) -> list:
+        """Build a prompt to extract actionable information from incoming messages.
+
+        Returns an OpenAI-style message list for the COMMUNICATION pipeline stage.
+        """
+        formatted = '\n'.join(
+            f"[{m['from']} -> {m['to']}] ({m['message_type']}) {m['text']}"
+            for m in messages
+        )
+        return [
+            {"role": "system", "content": _COMMUNICATION_PROMPT},
+            {"role": "user", "content": formatted},
+        ]
 
     # ── Query helpers ─────────────────────────────────────────────────────
 

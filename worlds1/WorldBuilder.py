@@ -19,6 +19,7 @@ from agents1.agents_graveyard.RescueAgent import RescueAgent
 from agents1.search_rescue_agent import SearchRescueAgent
 from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
+from worlds1.environment_info import EnvironmentInformation
 from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
 from loggers.ActionLogger import ActionLogger
@@ -69,7 +70,8 @@ _AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 def add_agents(builder, condition, name, folder, agent_type='baseline',
                num_rescue_agents=1, include_human=True, ollama_base_port=11434,
                planning_mode='simple', agent_presets=None,
-               capability_knowledge='informed', comm_strategies=None):
+               capability_knowledge='informed', comm_strategies=None,
+               env_info=None):
     """
     Add agents to the world.
 
@@ -144,6 +146,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     capabilities=caps,
                     capability_knowledge=capability_knowledge,
                     comm_strategy=comm_strategies[agent_nr],
+                    env_info=env_info,
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
@@ -319,13 +322,18 @@ def create_builder(condition, name, folder, agent_type='baseline',
         builder.add_object(loc,'roof', EnvObject,is_traversable=True, is_movable=False, visualize_shape='img',img_name="/images/roof-final5.svg")
 
     add_drop_off_zones(builder)
+
+    # Precompute static environment data (geometry, areas) — done once
+    env_info = EnvironmentInformation.build()
+
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
                         ollama_base_port=ollama_base_port,
                         planning_mode=planning_mode,
                         agent_presets=agent_presets,
                         capability_knowledge=capability_knowledge,
-                        comm_strategies=comm_strategies)
+                        comm_strategies=comm_strategies,
+                        env_info=env_info)
     add_victims(builder)
     # add_obstacles(builder)
     add_decorative_objects(builder)
