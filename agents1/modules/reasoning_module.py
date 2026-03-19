@@ -18,6 +18,7 @@ Communication can be done using the SendMessage tool call.
 - If a teammate asks for help (tag:ask_help) with a critical victim or big rock, consider assisting.
 - Use tag:share_info to share information you discover.
 - Use tag:reply to respond to direct questions.
+- If you need help carrying a victim AND another agent also needs help, negotiate: consider which victim is closer to the drop zone or more critical. Offer to help the other agent first if their need is greater, then ask them to help you after.
 """
 
 
@@ -33,13 +34,15 @@ class ReasoningIO(ReasoningBase):
         memory = information.get('memory', '') or 'none'
         communication = information.get('communication', '')
         all_observations = information.get('all_observations', '')
+        critic_feedback = information.get('critic_feedback', '')
 
         info_dict: Dict[str, Any] = {
             "current_subtask": task_decomposition,
             "observation": observation,
             "all_observations": all_observations,
             "memory": memory,
-            "messages": communication
+            "messages": communication,
+            "critic_feedback": critic_feedback,
         }
         print(to_toon(info_dict))
 
