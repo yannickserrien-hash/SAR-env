@@ -20,6 +20,10 @@ from agents1.search_rescue_agent import SearchRescueAgent
 from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
 from worlds1.environment_info import EnvironmentInformation
+from worlds1.world_presets import (
+    get_preset, to_areas_raw, generate_roof_tiles, generate_street_tiles,
+    WorldPreset,
+)
 from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
 from loggers.ActionLogger import ActionLogger
@@ -27,7 +31,7 @@ from datetime import datetime
 
 random_seed = 1
 verbose = False
-# Tick duration determines the speed of the world. A tick duration of 0.1 means 10 ticks are executed in a second. 
+# Tick duration determines the speed of the world. A tick duration of 0.1 means 10 ticks are executed in a second.
 # You can speed up or slow down the world by changing this value without changing behavior. Leave this value at 0.1 during evaluations.
 tick_duration = 0.1
 # Define the keyboard controls for the human agent
@@ -45,7 +49,6 @@ key_action_map = {
     }
 
 # Some settings
-nr_rooms = 9
 wall_color = "#8a8a8a"
 drop_off_color = "#1F262A"
 object_size = 0.9
@@ -57,21 +60,20 @@ object_sense_range = 1  # the range with which agents detect blocks. Do not chan
 other_sense_range = np.inf  # the range with which agents detect other objects (walls, doors, etc.). Do not change this value.
 fov_occlusion = True
 
-# Add the drop zones to the world
-def add_drop_off_zones(builder):
-    nr_drop_zones = 1
-    for nr_zone in range(nr_drop_zones):
-        builder.add_area((23,8), width=1, height=8, name=f"Drop off {nr_zone}", visualize_opacity=0.5, visualize_colour=drop_off_color, drop_zone_nr=nr_zone, is_drop_zone=True, is_goal_block=False, is_collectable=False) 
 
-# Candidate starting positions for AI agents (traversable street tiles near drop-off)
-_AGENT_START_POSITIONS = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
+def _compute_agent_starts(drop_zone_loc, grid_width):
+    """Compute agent start positions near the drop zone."""
+    dz_x, dz_y = drop_zone_loc
+    x = max(0, dz_x - 1)
+    return [(x, dz_y + i) for i in range(5)]
+
 
 # Add the agents to the world
 def add_agents(builder, condition, name, folder, agent_type='baseline',
                num_rescue_agents=1, include_human=True, ollama_base_port=11434,
                planning_mode='simple', agent_presets=None,
                capability_knowledge='informed', comm_strategies=None,
-               env_info=None):
+               env_info=None, agent_starts=None):
     """
     Add agents to the world.
 
@@ -89,6 +91,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                        Defaults to all 'generalist'.
         capability_knowledge: 'informed' (agents know capabilities) or 'discovery'
                               (agents learn from failures).
+        agent_starts: List of (x,y) start positions for agents.
     """
     if agent_presets is None:
         agent_presets = [DEFAULT_PRESET] * num_rescue_agents
@@ -100,6 +103,9 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         comm_strategies = ['always_respond'] * num_rescue_agents
     while len(comm_strategies) < num_rescue_agents:
         comm_strategies.append(comm_strategies[-1] if comm_strategies else 'always_respond')
+
+    if agent_starts is None:
+        agent_starts = [(22, 11), (21, 11), (20, 11), (22, 10), (21, 10)]
 
     # Define the human's sense capabilities based on the selected condition
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
@@ -151,7 +157,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                 agents.append(brain)
                 print(f"[WorldBuilder] Using Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
 
-            loc = _AGENT_START_POSITIONS[agent_nr % len(_AGENT_START_POSITIONS)]
+            loc = agent_starts[agent_nr % len(agent_starts)]
             builder.add_agent(loc, brain, team=team_name, name=agent_name,
                               customizable_properties=['score', 'thinking_state'],
                               score=0, thinking_state='idle',
@@ -163,168 +169,175 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         # Add human agent (optional)
         if include_human:
             brain = HumanBrain(max_carry_objects=1, grab_range=1, drop_range=0, remove_range=1, fov_occlusion=fov_occlusion, strength=condition, name=name)
-            loc = (22, 12)
-            builder.add_human_agent(loc, brain, team=team_name, name=name, key_action_map=key_action_map, sense_capability=sense_capability_human, is_traversable=True, img_name="/images/rescue-man-final3.svg", visualize_when_busy=True)
+            human_loc = agent_starts[0] if agent_starts else (22, 12)
+            human_loc = (human_loc[0], human_loc[1] + 1)
+            builder.add_human_agent(human_loc, brain, team=team_name, name=name, key_action_map=key_action_map, sense_capability=sense_capability_human, is_traversable=True, img_name="/images/rescue-man-final3.svg", visualize_when_busy=True)
     return agents
 
-def add_victims(builder):
-    # Add victims to the world
-    builder.add_object((23,8),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/critically injured girl.svg",drop_zone_nr=0)
-    builder.add_object((23,9),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/critically injured elderly woman.svg",drop_zone_nr=0)
-    builder.add_object((23,10),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/critically injured man.svg",drop_zone_nr=0)
-    builder.add_object((23,11),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/critically injured dog.svg",drop_zone_nr=0)
-    builder.add_object((23,12),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured boy.svg",drop_zone_nr=0)
-    builder.add_object((23,13),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured elderly man.svg",drop_zone_nr=0)
-    builder.add_object((23,14),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured woman.svg",drop_zone_nr=0)
-    builder.add_object((23,15),name="Collect Block", callable_class=GhostBlock,visualize_shape='img',img_name="/images/mildly injured cat.svg",drop_zone_nr=0)
 
-    builder.add_object((22,11),'mildly injured woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured woman.svg", area="area 7")
-    
-    
-    # builder.add_object((10,15),'critically injured elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured elderly woman.svg", area="area 9")
-    # builder.add_object((8,20),'healthy elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly woman.svg", area="area 12")
-    # builder.add_object((14,14),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 10")
-    # builder.add_object((4,15),'critically injured man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured man.svg", area="area 8")
-    # builder.add_object((2,14),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 8")
-    builder.add_object((10,3),'critically injured girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured girl.svg", area="area 2")
-    builder.add_object((2,2),'mildly injured boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured boy.svg", area="area 1")
-    # builder.add_object((16,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 3")
-    # builder.add_object((14,20),'mildly injured elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured elderly man.svg", area="area 13")
-    # builder.add_object((10,8),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 6")
-    builder.add_object((14,8),'mildly injured woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured woman.svg", area="area 7")
-    # builder.add_object((16,21),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 13")
-    builder.add_object((8,9),'critically injured dog', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/critically injured dog.svg", area="area 6")
-    # builder.add_object((4,21),'mildly injured cat', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/mildly injured cat.svg", area="area 11")
-    # builder.add_object((10,21),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 12")
-    # builder.add_object((16,9),'healthy girl', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy girl.svg", area="area 7")
-    # builder.add_object((22,3),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 4")
-    # builder.add_object((2,20),'healthy elderly woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly woman.svg", area="area 11")
-    # builder.add_object((20,2),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 4")
-    # builder.add_object((20,20),'healthy man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy man.svg", area="area 14")
-    # builder.add_object((22,21),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 14")
-    # builder.add_object((8,14),'healthy boy', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy boy.svg", area="area 9")
-    # builder.add_object((4,3),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 1")
-    # builder.add_object((14,2),'healthy elderly man', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy elderly man.svg", area="area 3")
-    # builder.add_object((16,15),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 10")
-    # builder.add_object((8,2),'healthy woman', callable_class=CollectableBlock, visualize_shape='img',img_name="/images/healthy woman.svg", area="area 2")
+def _apply_static_decorations(builder, overrides):
+    """Apply exact decorative object coordinates from the static preset."""
+    # Roof tiles
+    for loc in overrides.get('roof_tiles', []):
+        builder.add_object(loc, 'roof', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/roof-final5.svg")
 
-def add_obstacles(builder):
-    builder.add_object((3,4),'rock',ObstacleObject,visualize_shape='img',img_name="/images/stone.svg")
-    builder.add_object((9,4),'stone',ObstacleObject,visualize_shape='img',img_name="/images/stone-small.svg")
-    builder.add_object((9,16),'tree',ObstacleObject,visualize_shape='img',img_name="/images/tree-fallen2.svg")
-    builder.add_object((15, 7),'tree',ObstacleObject,visualize_shape='img',img_name="/images/tree-fallen2.svg")
-    builder.add_object((15,19),'tree',ObstacleObject,visualize_shape='img',img_name="/images/tree-fallen2.svg")
-    builder.add_object((3,16),'rock',ObstacleObject,visualize_shape='img',img_name="/images/stone.svg")
-    builder.add_object((15,4),'rock',ObstacleObject,visualize_shape='img',img_name="/images/stone.svg")
-    builder.add_object((21,19),'stone',ObstacleObject,visualize_shape='img',img_name="/images/stone-small.svg")
-    builder.add_object((9,19),'stone',ObstacleObject,visualize_shape='img',img_name="/images/stone-small.svg")
-    builder.add_object((9,7),'stone',ObstacleObject,visualize_shape='img',img_name="/images/stone-small.svg")
-    
-def add_decorative_objects(builder):
-    builder.add_object((1,12),'plant',EnvObject,is_traversable=True,is_movable=False,visualize_shape='img',img_name="/images/tree.svg", visualize_size=3)
-    builder.add_object((21,7),'heli',EnvObject,is_traversable=False,is_movable=False,visualize_shape='img',img_name="/images/helicopter.svg", visualize_size=3) 
-    builder.add_object((21,16),'ambulance',EnvObject,is_traversable=False,is_movable=False,visualize_shape='img',img_name="/images/ambulance.svg", visualize_size=2.3) 
-    
-    # Keyboard binds for human actions
-    builder.add_object(location=[12,0], is_traversable=True, name="keyboard sign", img_name="/images/keyboard-final.svg", visualize_depth=110, visualize_size=20)
+    # Street tiles (main)
+    for loc in overrides.get('street_tiles', []):
+        builder.add_object(loc, 'street', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/paving-final20.svg", visualize_size=1)
+
+    # Street tiles (alternate)
+    for loc in overrides.get('street_tiles_alt', []):
+        builder.add_object(loc, 'street', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/paving-final15.svg", visualize_size=1)
+
+    # Plants
+    for loc in overrides.get('plants', []):
+        builder.add_object(loc, 'plant', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/tree.svg", visualize_size=1.25)
+
+    # Decorative objects (helicopter, ambulance, etc.)
+    for obj in overrides.get('decorative_objects', []):
+        builder.add_object(obj['pos'], obj['name'], EnvObject,
+                           is_traversable=obj.get('traversable', True), is_movable=False,
+                           visualize_shape='img', img_name=obj['img'],
+                           visualize_size=obj.get('size', 1))
+
+    # Keyboard sign
+    if 'keyboard_sign' in overrides:
+        builder.add_object(location=list(overrides['keyboard_sign']), is_traversable=True,
+                           name="keyboard sign", img_name="/images/keyboard-final.svg",
+                           visualize_depth=110, visualize_size=20)
+
+    # Area signs
+    for loc, num_str, size in overrides.get('area_signs', []):
+        builder.add_object(location=list(loc), is_traversable=True, is_movable=False,
+                           name=f"area {num_str} sign",
+                           img_name=f"/images/sign{num_str}.svg",
+                           visualize_depth=110, visualize_size=size)
 
 
-    for loc in [(11,5),(13,5),(14,5),(13,6),(14,6),(12,5),(15,5),(15,6),(16,5),(16,6),(17,5),(17,6),(18,5),
-                (8,6),(7,6),(6,6),(5,6),(4,6),(3,6),(2,6),(1,6),(20,9),(21,9),(21,14),(20,14),(19,14),(9,6),
-                (1,5),(2,5),(3,5),(4,5),(5,5),(22,11),(22,12),(19,18),(18,18),(17,18),(16,18),(15,18),(13,17),
-                (11,17),(10,17),(8,18),(7,18),(6,18),(5,18),(4,18),(3,18),(2,18),(1,18),(12,17),(18,6)]:
-        builder.add_object(loc,'street',EnvObject,is_traversable=True,is_movable=False,visualize_shape='img',img_name="/images/paving-final20.svg", visualize_size=1) 
+def _apply_auto_decorations(builder, preset):
+    """Generate and apply decorative objects procedurally from room geometry."""
+    # Roof tiles from wall cells
+    for loc in generate_roof_tiles(preset.rooms):
+        builder.add_object(loc, 'roof', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/roof-final5.svg")
 
-    for loc in [(12,3),(12,4),(18,1),(18,2),(18,3),(18,4),(6,19),(6,20),(6,21),(18,19)]:
-        builder.add_object(loc,'plant',EnvObject,is_traversable=True,is_movable=False,visualize_shape='img',img_name="/images/tree.svg", visualize_size=1.25) 
-        
-    for loc in [(21,10),(21,11),(21,12),(21,13),(19,15),(19,16)]:
-        builder.add_object(loc,'street',EnvObject,is_traversable=True,is_movable=False,visualize_shape='img',img_name="/images/paving-final15.svg", visualize_size=1) 
-
-def add_water(builder):
-    # Water will slow down agents when they walk through it
-    for loc in [(6,1),(6,2),(6,3),(6,4),(6,5),(6,12),(6,13),(6,14),(6,15),(6,16),(6,17),(11,12),(11,11),(18,12),(18,21),
-            (3,12),(3,11),(12,6),(12,7),(12,8),(12,9),(12,10),(12,11),(18,11),(18,10),(18,9),(19,9),(19,8),(18,22),
-            (18,13),(18,14),(18,15),(18,16),(18,17),(9,17),(9,18),(20,17),(20,18),(12,1),(12,2),(6,22),(18,20),
-            (19,7),(19,6),(19,5),(10,6),(10,5),(14,17),(14,18),(12,19),(12,20),(12,21),(12,18),(12,22)]:
-        builder.add_object(loc,'water',EnvObject,is_traversable=True, is_movable=False, visualize_shape='img',img_name="/images/pool20.svg")
-
-    for loc in [(1,11),(2,11),(3,11),(3,12),(4,12),(5,12),(6,12),(7,12),(8,12),(9,12),(10,12),(11,12),(12,11),(13,11),(20,17),
-                (14,11),(15,11),(16,11),(17,11),(18,11),(6,17),(7,17),(8,17),(9,17),(9,18),(5,17),(4,17),(3,17),(2,17),(1,17),
-                (18,9),(19,9),(19,5),(20,5),(21,5),(22,5),(23,5),(11,6),(12,6),(10,6),(10,5),(9,5),(8,5),(7,5),(6,5),(19,17),
-                (11,11),(18,17),(17,17),(16,17),(15,17),(14,17),(14,18),(13,18),(12,18),(10,18),(11,18)]:
-        builder.add_object(loc,'water', EnvObject,is_traversable=True, is_movable=False, visualize_shape='img', img_name="/images/lake2.svg")
+    # Street tiles connecting rooms to drop zone
+    for loc in generate_street_tiles(preset.rooms, preset.drop_zone,
+                                     preset.grid_width, preset.grid_height):
+        builder.add_object(loc, 'street', EnvObject, is_traversable=True, is_movable=False,
+                           visualize_shape='img', img_name="/images/paving-final20.svg", visualize_size=1)
 
 
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
                    num_rescue_agents=1, include_human=True, ollama_base_port=11434,
                    planning_mode='simple', agent_presets=None,
-                   capability_knowledge='informed', comm_strategies=None):
+                   capability_knowledge='informed', comm_strategies=None,
+                   world_preset='static', world_seed=None):
     # Set numpy's random generator
     np.random.seed(random_seed)
-    # Create the collection goal
-    goal = CollectionGoal(max_nr_ticks=np.inf)
+
+    # Resolve the world preset
+    preset = get_preset(world_preset, seed=world_seed)
+    print(f"[WorldBuilder] Using world preset '{preset.name}' "
+          f"({preset.grid_width}x{preset.grid_height}, {len(preset.rooms)} rooms)")
+
+    # Count total victims
+    total_victims = sum(len(r.victims) for r in preset.rooms)
+
+    # Create the collection goal with dynamic drop zone
+    dz = preset.drop_zone
+    goal = CollectionGoal(
+        max_nr_ticks=np.inf,
+        drop_zone_location=dz.location,
+        drop_zone_height=dz.height,
+        total_victims=total_victims,
+    )
+
     # Create the world builder
-    builder = WorldBuilder(shape=[25,24], tick_duration=tick_duration, run_matrx_api=True, run_matrx_visualizer=False, verbose=verbose, simulation_goal=goal, visualization_bg_clr='#9a9083')
-    
+    builder = WorldBuilder(
+        shape=[preset.grid_width, preset.grid_height],
+        tick_duration=tick_duration, run_matrx_api=True,
+        run_matrx_visualizer=False, verbose=verbose,
+        simulation_goal=goal, visualization_bg_clr='#9a9083',
+    )
+
     # Create folders where the logs are stored during the official condition
-    current_exp_folder = datetime.now().strftime("exp_"+condition+"_at_time_%Hh-%Mm-%Ss_date_%dd-%mm-%Yy") #TODO: change file name to include more information on the experiment
+    current_exp_folder = datetime.now().strftime("exp_"+condition+"_at_time_%Hh-%Mm-%Ss_date_%dd-%mm-%Yy")
     logger_save_folder = os.path.join("logs", current_exp_folder)
     builder.add_logger(ActionLogger, log_strategy=1, save_path=logger_save_folder, file_name_prefix="actions_")
-        
-    # Add all area and objects to the official world
-    builder.add_room(top_left_location=(0, 0), width=25, height=24, name="world_bounds", wall_visualize_colour="#1F262A")
-    builder.add_room(top_left_location=(1,1), width=5, height=4, name='area 1', door_locations=[(3,4)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0, door_open_colour='#9a9083', area_custom_properties={'doormat':(3,5)})
-    builder.add_room(top_left_location=(7,1), width=5, height=4, name='area 2', door_locations=[(9,4)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(9,5)})
-    builder.add_room(top_left_location=(13,1), width=5, height=4, name='area 3', door_locations=[(15,4)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(15,5)})
-    builder.add_room(top_left_location=(19,1), width=5, height=4, name='area 4', door_locations=[(21,4)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(21,5)})
-    builder.add_room(top_left_location=(1,7), width=5, height=4, name='area 5', door_locations=[(3,7)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(3,6)})
-    builder.add_room(top_left_location=(7,7), width=5, height=4, name='area 6', door_locations=[(9,7)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(9,6)})
-    builder.add_room(top_left_location=(13,7), width=5, height=4, name='area 7', door_locations=[(15,7)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(15,6)})
-    # builder.add_room(top_left_location=(1,13), width=5, height=4, name='area 8', door_locations=[(3,16)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(3,17)})
-    # builder.add_room(top_left_location=(7,13), width=5, height=4, name='area 9', door_locations=[(9,16)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(9,17)})
-    # builder.add_room(top_left_location=(13,13), width=5, height=4, name='area 10', door_locations=[(15,16)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(15,17)})
-    # builder.add_room(top_left_location=(1,19), width=5, height=4, name='area 11', door_locations=[(3,19)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(3,18)})
-    # builder.add_room(top_left_location=(7,19), width=5, height=4, name='area 12', door_locations=[(9,19)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(9,18)})
-    # builder.add_room(top_left_location=(13,19), width=5, height=4, name='area 13', door_locations=[(15,19)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(15,18)})
-    # builder.add_room(top_left_location=(19,19), width=5, height=4, name='area 14', door_locations=[(21,19)],doors_open=True, wall_visualize_colour=wall_color, with_area_tiles=True, area_visualize_colour='#0008ff',area_visualize_opacity=0.0,door_open_colour='#9a9083', area_custom_properties={'doormat':(21,18)})
 
-    builder.add_object(location=[3,1], is_traversable=True, is_movable=False, name="area 01 sign", img_name="/images/sign01.svg", visualize_depth=110, visualize_size=0.5)
-    builder.add_object(location=[9,1], is_traversable=True, is_movable=False, name="area 02 sign", img_name="/images/sign02.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[15,1], is_traversable=True, is_movable=False, name="area 03 sign", img_name="/images/sign03.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[21,1], is_traversable=True, is_movable=False, name="area 04 sign", img_name="/images/sign04.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[3,10], is_traversable=True, is_movable=False, name="area 05 sign", img_name="/images/sign05.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[9,10], is_traversable=True, is_movable=False, name="area 06 sign", img_name="/images/sign06.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[15,10], is_traversable=True, is_movable=False, name="area 07 sign", img_name="/images/sign07.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[3,13], is_traversable=True, is_movable=False, name="area 08 sign", img_name="/images/sign08.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[9,13], is_traversable=True, is_movable=False, name="area 09 sign", img_name="/images/sign09.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[15,13], is_traversable=True, is_movable=False, name="area 10 sign", img_name="/images/sign10.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[3,22], is_traversable=True, is_movable=False, name="area 11 sign", img_name="/images/sign11.svg", visualize_depth=110, visualize_size=0.45)
-    builder.add_object(location=[9,22], is_traversable=True, is_movable=False, name="area 12 sign", img_name="/images/sign12.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[15,22], is_traversable=True, is_movable=False, name="area 13 sign", img_name="/images/sign13.svg", visualize_depth=110, visualize_size=0.55)
-    builder.add_object(location=[21,22], is_traversable=True, is_movable=False, name="area 14 sign", img_name="/images/sign14.svg", visualize_depth=110, visualize_size=0.55)
+    # World bounds
+    builder.add_room(top_left_location=(0, 0), width=preset.grid_width,
+                     height=preset.grid_height, name="world_bounds",
+                     wall_visualize_colour="#1F262A")
 
-    for loc in [(1,1),(2,1),(3,1),(4,1),(5,1),(1,2),(1,3),(1,4),(2,4),(4,4),(5,4),(5,3),(5,2),(7,1),(8,1),(9,1),
-                (10,1),(11,1),(7,2),(7,3),(7,4),(8,4),(11,2),(11,3),(11,4),(10,4),(16,4),(17,4),(17,3),(17,2),
-                (13,1),(14,1),(15,1),(16,1),(17,1),(13,1),(14,1),(15,1),(16,1),(17,1),(13,2),(13,3),(13,4),(14,4),
-                (19,1),(20,1),(21,1),(22,1),(23,1),(19,2),(19,3),(19,4),(20,4),(22,4),(23,4),(23,3),(23,2),(23,1),
-                (1,7),(1,8),(1,9),(1,10),(2,10),(3,10),(4,10),(5,10),(5,9),(5,8),(5,7),(4,7),(2,7),(16,16),(10,19),
-                (13,7),(13,8),(13,9),(13,10),(14,10),(15,10),(16,10),(17,10),(17,9),(17,8),(17,7),(16,7),(14,7),
-                (1,13),(2,13),(3,13),(4,13),(5,13),(1,14),(1,15),(1,16),(2,16),(4,16),(5,16),(5,15),(5,14),(5,13),
-                (7,13),(8,13),(9,13),(10,13),(11,13),(7,14),(7,15),(7,16),(8,16),(10,16),(11,16),(11,15),(11,14),
-                (13,13),(14,13),(15,13),(16,13),(17,13),(13,14),(13,15),(13,16),(14,16),(17,14),(17,15),(17,16),
-                (1,19),(2,19),(4,19),(5,19),(1,20),(1,21),(1,22),(2,22),(3,22),(4,22),(5,22),(5,21),(5,20),(5,19),
-                (7,19),(8,19),(4,19),(5,19),(7,20),(7,21),(7,22),(8,22),(9,22),(10,22),(11,22),(11,21),(11,20),(11,19),
-                (13,19),(14,19),(16,19),(17,19),(13,20),(13,21),(13,22),(14,22),(15,22),(16,22),(17,22),(17,21),(17,20),
-                (19,19),(20,19),(22,19),(23,19),(19,20),(19,21),(19,22),(20,22),(21,22),(22,22),(23,22),(23,21),(23,20),
-                (7,7),(7,8),(7,9),(7,10),(8,10),(9,10),(10,10),(11,10),(11,9),(11,8),(11,7),(10,7),(8,7)]:
-        builder.add_object(loc,'roof', EnvObject,is_traversable=True, is_movable=False, visualize_shape='img',img_name="/images/roof-final5.svg")
+    # Add rooms from preset
+    for room in preset.rooms:
+        builder.add_room(
+            top_left_location=room.pos, width=room.width, height=room.height,
+            name=f'area {room.id}', door_locations=[room.door], doors_open=True,
+            wall_visualize_colour=wall_color, with_area_tiles=True,
+            area_visualize_colour='#0008ff', area_visualize_opacity=0.0,
+            door_open_colour='#9a9083',
+            area_custom_properties={'doormat': room.doormat},
+        )
 
-    add_drop_off_zones(builder)
+    # Drop zone
+    builder.add_area(
+        dz.location, width=1, height=dz.height,
+        name="Drop off 0", visualize_opacity=0.5,
+        visualize_colour=drop_off_color, drop_zone_nr=0,
+        is_drop_zone=True, is_goal_block=False, is_collectable=False,
+    )
 
-    # Precompute static environment data (geometry, areas) — done once
-    env_info = EnvironmentInformation.build()
+    # Ghost blocks (drop zone placeholders) — one per ghost victim
+    for i, (gv_name, gv_img) in enumerate(preset.ghost_victims):
+        builder.add_object(
+            (dz.location[0], dz.location[1] + i),
+            name="Collect Block", callable_class=GhostBlock,
+            visualize_shape='img', img_name=gv_img, drop_zone_nr=0,
+        )
+
+    # Actual victims
+    for room in preset.rooms:
+        for victim in room.victims:
+            builder.add_object(
+                victim.location, victim.name,
+                callable_class=CollectableBlock, visualize_shape='img',
+                img_name=victim.img, area=victim.area,
+            )
+
+    # Obstacles
+    for room in preset.rooms:
+        for obs in room.obstacles:
+            builder.add_object(
+                obs.location, obs.name, ObstacleObject,
+                visualize_shape='img', img_name=obs.img,
+            )
+
+    # Decorative objects
+    if preset.decorative_overrides:
+        _apply_static_decorations(builder, preset.decorative_overrides)
+    else:
+        _apply_auto_decorations(builder, preset)
+
+    # Build environment info from preset
+    areas_raw = to_areas_raw(preset)
+    env_info = EnvironmentInformation.build(
+        areas_raw=areas_raw,
+        drop_zone=dz.location,
+        drop_zone_height=dz.height,
+        grid_size=(preset.grid_width, preset.grid_height),
+        num_victims=total_victims,
+    )
+
+    # Agent start positions derived from drop zone
+    agent_starts = _compute_agent_starts(dz.location, preset.grid_width)
 
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
@@ -333,13 +346,11 @@ def create_builder(condition, name, folder, agent_type='baseline',
                         agent_presets=agent_presets,
                         capability_knowledge=capability_knowledge,
                         comm_strategies=comm_strategies,
-                        env_info=env_info)
-    add_victims(builder)
-    # add_obstacles(builder)
-    add_decorative_objects(builder)
-    # add_water(builder)
-    
-    return builder, agents
+                        env_info=env_info,
+                        agent_starts=agent_starts)
+
+    return builder, agents, total_victims
+
 
 class CollectableBlock(EnvObject):
     '''
@@ -377,14 +388,19 @@ class CollectionGoal(WorldGoal):
     '''
     The goal for world which determines when the simulator should stop.
     '''
-    def __init__(self, max_nr_ticks):
+    def __init__(self, max_nr_ticks, drop_zone_location=(23, 8),
+                 drop_zone_height=8, total_victims=8):
         super().__init__()
         self.max_nr_ticks = max_nr_ticks
+        self._dz_x = drop_zone_location[0]
+        self._dz_y_min = drop_zone_location[1]
+        self._dz_y_max = drop_zone_location[1] + drop_zone_height - 1
+        self._total_victims = total_victims
         self.__drop_off= {}
         self.__drop_off_zone = {}
         self.__progress = 0
         self.__score = 0
-    
+
     def score(self, grid_world):
         return self.__score
 
@@ -410,7 +426,7 @@ class CollectionGoal(WorldGoal):
 
     def progress(self, grid_world):
         # find all drop off locations, its tile ID's and goal blocks
-        if self.__drop_off =={}:  
+        if self.__drop_off =={}:
             self.__find_drop_off_locations(grid_world)
         # Go through each drop zone, and check if the victims are there in the right spot
         is_satisfied, progress = self.__check_completion(grid_world)
@@ -424,7 +440,7 @@ class CollectionGoal(WorldGoal):
             'score': self.__score,
             'block_hit_rate': self.__progress,
             'victims_rescued': len(getattr(self, '_scored_victims', set())),
-            'total_victims': 8
+            'total_victims': self._total_victims
         }
         score_file = os.path.join('logs', 'score.json')
         os.makedirs('logs', exist_ok=True)
@@ -432,7 +448,7 @@ class CollectionGoal(WorldGoal):
             json.dump(score_data, f, indent=2)
 
     def __find_drop_off_locations(self, grid_world):
-        goal_vics = {} 
+        goal_vics = {}
         all_objs = grid_world.environment_objects
         for obj_id, obj in all_objs.items():  # go through all objects
             if "drop_zone_nr" in obj.properties.keys():  # check if the object is part of a drop zone
@@ -484,10 +500,10 @@ class CollectionGoal(WorldGoal):
         # Get all objects in the world
         all_objs = grid_world.environment_objects
 
-        # Define drop zone area (x=23, y=8-15)
-        drop_zone_x = 23
-        drop_zone_y_min = 8
-        drop_zone_y_max = 15
+        # Use dynamic drop zone coordinates
+        drop_zone_x = self._dz_x
+        drop_zone_y_min = self._dz_y_min
+        drop_zone_y_max = self._dz_y_max
 
         # Find all collectable victims in the drop zone
         for obj_id, obj in all_objs.items():

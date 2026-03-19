@@ -334,10 +334,10 @@ class ActionValidator:
 
     @staticmethod
     def _get_nearby(ws: Dict) -> List[Dict]:
-        """Extract the current_observation list from world_state."""
+        """Extract all nearby objects (victims + obstacles) from world_state."""
         if not isinstance(ws, dict):
             return []
-        return ws.get('current_observation', [])
+        return ws.get('victims', []) + ws.get('obstacles', [])
 
     @staticmethod
     def _find_object(obj_id: str, ws: Dict) -> Optional[Dict]:

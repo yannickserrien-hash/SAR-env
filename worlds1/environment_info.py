@@ -67,11 +67,23 @@ class EnvironmentInformation:
 
     Attributes:
         areas: Mapping from area integer ID to its full metadata.
+        drop_zone: Top-left coordinate of the drop zone.
+        drop_zone_height: Vertical extent of the drop zone.
+        grid_size: (width, height) of the grid world.
+        num_victims: Total number of victims in the world.
     """
     areas: Dict[int, AreaMetadata] = field(default_factory=dict)
+    drop_zone: Tuple[int, int] = (23, 8)
+    drop_zone_height: int = 8
+    grid_size: Tuple[int, int] = (25, 24)
+    num_victims: int = 8
 
     @staticmethod
-    def build(areas_raw: Optional[List[Dict[str, Any]]] = None) -> EnvironmentInformation:
+    def build(areas_raw: Optional[List[Dict[str, Any]]] = None,
+              drop_zone: Tuple[int, int] = (23, 8),
+              drop_zone_height: int = 8,
+              grid_size: Tuple[int, int] = (25, 24),
+              num_victims: int = 8) -> EnvironmentInformation:
         """Construct from raw area config (defaults to AREAS_RAW)."""
         if areas_raw is None:
             areas_raw = AREAS_RAW
@@ -96,7 +108,13 @@ class EnvironmentInformation:
                 enter_direction=cfg.get("enter"),
             )
 
-        return EnvironmentInformation(areas=areas)
+        return EnvironmentInformation(
+            areas=areas,
+            drop_zone=drop_zone,
+            drop_zone_height=drop_zone_height,
+            grid_size=grid_size,
+            num_victims=num_victims,
+        )
 
     # ── Convenience lookups ─────────────────────────────────────────────────
 
