@@ -21,7 +21,7 @@ from matrx.messages.message import Message
 
 from agents1.async_model_prompting import get_llm_result
 from agents1.capabilities import filter_tools_for_capabilities, get_capability_prompt, get_game_rules
-from agents1.llm_agent_base import LLMAgentBase
+from agents1.llm_agent_base import LLMAgentBase, SM_TASK_ASSIGNMENTS
 from agents1.modules.area_tracker import AreaExplorationTracker
 from agents1.modules.execution_module import execute_action
 from agents1.modules.reasoning_module import ReasoningIO
@@ -246,7 +246,7 @@ class SearchRescueAgent(LLMAgentBase):
         # P0: Read other agents' tasks from SharedMemory
         other_tasks = {}
         if self.shared_memory:
-            all_tasks = self.shared_memory.retrieve('current_task_assignments') or {}
+            all_tasks = self.shared_memory.retrieve(SM_TASK_ASSIGNMENTS) or {}
             other_tasks = {k: v for k, v in all_tasks.items() if k != self.agent_id}
 
         # Get raw messages for planner (messages flow into planning, not reasoning)

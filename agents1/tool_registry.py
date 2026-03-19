@@ -40,13 +40,9 @@ REASONING_STRATEGIES: Dict[str, str] = {
     ),
 }
 
-# Default drop zone location (overridden by env_info at runtime).
-_DEFAULT_DROP_ZONE = (23, 8)
-
-
-def get_game_rules_str(drop_zone=None):
+def get_game_rules_str(drop_zone=(23, 8)):
     """Static fallback game rules. For capability-aware rules, use agents1.capabilities.get_game_rules()."""
-    dz = drop_zone or _DEFAULT_DROP_ZONE
+    dz = drop_zone
     return (
         "Rules:\n"
         f"- Critically injured victims require CarryObjectTogether (both agents).\n"
@@ -200,18 +196,6 @@ def Idle(duration_in_ticks: int = 1):
         duration_in_ticks: Number of ticks to wait (default 1).
     """
     return 'Idle', {'duration_in_ticks': duration_in_ticks}, {'task_completing': f"idling for {duration_in_ticks} ticks"}
-
-@tool
-def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
-    """Retrieve relevant information from memory
-
-    Args:
-        information: A description of the current situation or what information is needed.
-        memory: The agent's memory storage to search through.
-    """
-    # send_message(Message(content=f"Retrieving information from memory: {information}", from_id=self.agent_id))
-    
-    return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
 
 @tool
 def SendMessage(message: str, send_to: str, message_type: str = "message"):
