@@ -712,7 +712,11 @@ class LLMAgentBase(ArtificialBrain, Perception):
             self._pending_carry_kwargs = dict(kwargs)
             self._carry_wait_ticks = 0
             self._reasoning_step = False
+            self._clear_partner_help_requests()
             return action_name, kwargs
+
+        if action_name == _RemoveObjectTogether.__name__:
+            self._clear_partner_help_requests()
 
         return action_name, kwargs
 
@@ -758,6 +762,17 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         self._reasoning_step = True
         return self._idle()
+
+    def _clear_partner_help_requests(self) -> None:
+        """Clear partner help requests from SharedMemory after cooperative action dispatch."""
+        if not self.shared_memory:
+            return
+        all_mem = self.shared_memory.retrieve_all()
+        for key, val in all_mem.items():
+            if (isinstance(key, str) and key.startswith('help_request_')
+                    and val and val.get('agent') != self.agent_id):
+                self.shared_memory.update(key, None)
+                print(f'[{self.agent_id}] Cleared help request from {val.get("agent")}')
 
     # ── Action validation ─────────────────────────────────────────────────
 

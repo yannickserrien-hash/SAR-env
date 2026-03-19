@@ -50,7 +50,7 @@ def get_game_rules_str(drop_zone=None):
     return (
         "Rules:\n"
         f"- Critically injured victims require CarryObjectTogether (both agents).\n"
-        "- Big grey rocks require RemoveObjectTogether (both agents).\n"
+        "- Big rocks require RemoveObjectTogether (both agents).\n"
         "- Trees can only be removed by the rescue robot (RemoveObject).\n"
         "- Small stones can be removed solo (RemoveObject).\n"
         f"- Deliver rescued victims to the drop zone at {dz}.\n"
@@ -142,7 +142,7 @@ def CarryObject(object_id: str, task_completing: str = "carrying victim"):
 
 @tool
 def CarryObjectTogether(object_id: str, task_completing: str = "carrying victim cooperatively"):
-    """Cooperatively carry a critically injured victim or big grey rock with a partner agent.
+    """Cooperatively carry a critically injured victim or big rock with a partner agent.
     Both agents must be adjacent to the object.
 
     Args:
@@ -180,7 +180,7 @@ def RemoveObject(object_id: str, task_completing: str = "removing obstacle"):
 
 @tool
 def RemoveObjectTogether(object_id: str, task_completing: str = "removing obstacle cooperatively"):
-    """Cooperatively remove a big grey rock obstacle with a partner agent.
+    """Cooperatively remove a big rock obstacle with a partner agent.
     Both agents must be adjacent to the rock.
 
     Args:

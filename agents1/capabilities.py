@@ -24,9 +24,9 @@ CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
     },
     'medic': {
         'vision': 1,
-        'strength': 'medium',
+        'strength': 'low',
         'medical': 'high',
-        'speed': 'slow',
+        'speed': 'medium',
     },
     'heavy_lifter': {
         'vision': 1,
@@ -126,9 +126,9 @@ def get_capability_prompt(capabilities: Dict[str, Any]) -> str:
     # Speed
     sp = capabilities.get('speed', 'normal')
     if sp == 'slow':
-        lines.append("- Speed: slow — your movement takes extra ticks (you move slower than other agents).")
+        lines.append("- Speed: slow — each move costs 3 extra ticks (you move significantly slower than other agents).")
     elif sp == 'fast':
-        lines.append("- Speed: fast — you move at normal speed with no delays.")
+        lines.append("- Speed: fast — you move at full speed with no delays.")
     else:
         lines.append("- Speed: normal — standard movement speed.")
 
@@ -160,7 +160,7 @@ def filter_tools_for_capabilities(
     return filtered_tools_by_name, filtered_schemas
 
 
-def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=None) -> str:
+def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=None, num_victims: int = None) -> str:
     """Return game rules string, optionally tailored to agent capabilities."""
     dz = drop_zone or (23, 8)
     base_rules = [
@@ -168,12 +168,14 @@ def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=None) -> str:
         f"- Deliver rescued victims to the drop zone at {dz}.",
         "- You can only carry one victim at a time.",
     ]
+    if num_victims is not None:
+        base_rules.append(f"- There are {num_victims} victims total in the world.")
 
     if capabilities is None:
         # Generic rules (no capability info)
         base_rules.extend([
             "- Critically injured victims require CarryObjectTogether (both agents).",
-            "- Big grey rocks require RemoveObjectTogether (both agents).",
+            "- Big rocks require RemoveObjectTogether (both agents).",
             "- Trees can only be removed by the rescue robot (RemoveObject).",
             "- Small stones can be removed solo (RemoveObject).",
         ])
@@ -202,7 +204,7 @@ def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=None) -> str:
         elif strength == 'medium':
             base_rules.extend([
                 "- Trees and small stones can be removed solo (RemoveObject).",
-                "- Big grey rocks require RemoveObjectTogether (both agents).",
+                "- Big rocks require RemoveObjectTogether (both agents).",
             ])
         else:  # low
             base_rules.extend([

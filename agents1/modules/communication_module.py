@@ -19,19 +19,20 @@ VALID_MESSAGE_TYPES = frozenset({'ask_help', 'help', 'message'})
 
 _COMMUNICATION_PROMPT = """You are a communication processor for a Search and Rescue agent team.
 Extract actionable information from the following inter-agent messages.
+If information is ambiguous or contradictory, prefer the most recent message.
 
 Respond in JSON format:
 {
-    "discovered_victims": [{"id": "...", "location": [x,y], "severity": "..."}],
-    "discovered_obstacles": [{"id": "...", "location": [x,y], "type": "..."}],
-    "help_requests": [{"from": "agent_id", "task": "...", "location": [x,y]}],
-    "explored_areas": [{"area": "area N", "by": "agent_id", "status": "complete|partial"}],
-    "teammate_updates": [{"agent": "agent_id", "status": "...", "location": [x,y]}],
-    "summary": "Brief one-sentence summary of key information"
+    "discovered_victims": [{"id": "victim_id", "location": [x,y], "severity": "mild|critical"}],
+    "discovered_obstacles": [{"id": "obstacle_id", "location": [x,y], "type": "rock|stone|tree"}],
+    "help_requests": [{"from": "agent_id", "task": "description", "location": [x,y]}],
+    "explored_areas": [{"area": "area N", "by": "agent_id", "status": "complete|partial|not_started"}],
+    "teammate_updates": [{"agent": "agent_id", "status": "description", "location": [x,y]}],
+    "summary": "One sentence prioritizing: (1) urgent help requests, (2) new discoveries, (3) status updates"
 }
 
-Only include fields that have actual data. If nothing relevant, return {"summary": "No actionable information"}.
-Ensure the response can be parsed by Python `json.loads`."""
+Only include fields with actual data. If nothing relevant, return {"summary": "No actionable information"}.
+Respond with valid JSON only."""
 
 
 # ── Strategies ────────────────────────────────────────────────────────────────
@@ -241,15 +242,24 @@ class CommunicationModule:
 
     # ── Communication stage prompt ───────────────────────────────────────
 
-    def get_communication_prompt(self, messages: list) -> list:
+    def get_communication_prompt(self, messages: list, agent_context: dict = None) -> list:
         """Build a prompt to extract actionable information from incoming messages.
 
         Returns an OpenAI-style message list for the COMMUNICATION pipeline stage.
+        Optionally includes agent context (position, task, carrying) for relevance assessment.
         """
         formatted = '\n'.join(
             f"[{m['from']} -> {m['to']}] ({m['message_type']}) {m['text']}"
             for m in messages
         )
+        if agent_context:
+            context_str = (
+                f"Your current state:\n"
+                f"- Position: {agent_context.get('position')}\n"
+                f"- Current task: {agent_context.get('current_task')}\n"
+                f"- Carrying: {agent_context.get('carrying')}\n"
+            )
+            formatted = context_str + "\nMessages:\n" + formatted
         return [
             {"role": "system", "content": _COMMUNICATION_PROMPT},
             {"role": "user", "content": formatted},

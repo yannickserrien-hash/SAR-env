@@ -5,7 +5,7 @@ Extends LLMAgentBase which handles all infrastructure (navigation, carry
 retry, rendezvous, action validation, task injection).
 
 This class implements a multi-stage async pipeline:
-    CRITIC → PLANNING → COMMUNICATION → REASONING → EXECUTE
+    CRITIC → PLANNING → REASONING → EXECUTE
 
 Each LLM stage is non-blocking: submit a call, return Idle, poll next tick.
 Stage outputs flow forward via _pipeline_context.
@@ -37,7 +37,6 @@ class PipelineStage(Enum):
     IDLE = 'idle'
     CRITIC = 'critic'
     PLANNING = 'planning'
-    COMMUNICATION = 'communication'
     REASONING = 'reasoning'
     EXECUTE = 'execute'
 
@@ -46,7 +45,7 @@ class SearchRescueAgent(LLMAgentBase):
     """MARBLE-powered rescue agent with multi-stage cognitive pipeline.
 
     Pipeline per cycle:
-        [CRITIC] → PLANNING → COMMUNICATION → REASONING → EXECUTE
+        [CRITIC] → PLANNING → REASONING → EXECUTE
 
     Critic runs on all cycles except the first (no previous action to evaluate)
     and when the last action was Idle/None.
@@ -170,8 +169,6 @@ class SearchRescueAgent(LLMAgentBase):
             return self._submit_critic()
         if self._pipeline_stage == PipelineStage.PLANNING:
             return self._submit_planning()
-        if self._pipeline_stage == PipelineStage.COMMUNICATION:
-            return self._submit_communication()
         if self._pipeline_stage == PipelineStage.REASONING:
             return self._submit_reasoning()
         if self._pipeline_stage == PipelineStage.EXECUTE:
@@ -184,11 +181,26 @@ class SearchRescueAgent(LLMAgentBase):
             return self._handle_critic_result(result)
         if self._pipeline_stage == PipelineStage.PLANNING:
             return self._handle_planning_result(result)
-        if self._pipeline_stage == PipelineStage.COMMUNICATION:
-            return self._handle_communication_result(result)
         if self._pipeline_stage == PipelineStage.REASONING:
             return self._handle_reasoning_result(result)
         return self._idle()
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _get_rescued_victims(self):
+        """Derive rescued victims from SharedMemory (if tracked) or memory log."""
+        if self.shared_memory:
+            rescued = self.shared_memory.retrieve('rescued_victims')
+            if rescued:
+                return rescued
+        # Fallback: scan memory for successful Drop actions at drop zone
+        rescued = []
+        for entry in self.memory.retrieve_all():
+            if isinstance(entry, dict) and entry.get('action') in ('Drop', 'DropObject'):
+                victim_id = entry.get('args', {}).get('object_id', '')
+                if victim_id and victim_id not in rescued:
+                    rescued.append(victim_id)
+        return rescued or None
 
     # ── CRITIC stage ────────────────────────────────────────────────────
 
@@ -203,8 +215,12 @@ class SearchRescueAgent(LLMAgentBase):
             'last_action': self._last_action,
             'observation': self.WORLD_STATE,
             'all_observations': self.WORLD_STATE_GLOBAL,
-            'communication': self.comm.get_messages_for_prompt(limit=5),
         })
+
+        # P1: Inject capability context so critic doesn't suggest infeasible actions
+        if self._capabilities and self._capability_knowledge == 'informed':
+            cap_text = get_capability_prompt(self._capabilities)
+            prompt[0]['content'] += f"\n\nAgent capabilities:\n{cap_text}"
 
         print(f'[{self.agent_id}] Pipeline: CRITIC — evaluating last action: {last_name}')
         self._submit_llm(prompt)
@@ -227,17 +243,37 @@ class SearchRescueAgent(LLMAgentBase):
     # ── PLANNING stage ──────────────────────────────────────────────────
 
     def _submit_planning(self) -> Tuple[Optional[str], Dict]:
+        # P0: Read other agents' tasks from SharedMemory
+        other_tasks = {}
+        if self.shared_memory:
+            all_tasks = self.shared_memory.retrieve('current_task_assignments') or {}
+            other_tasks = {k: v for k, v in all_tasks.items() if k != self.agent_id}
+
+        # Get raw messages for planner (messages flow into planning, not reasoning)
+        agent_busy = self._nav_target is not None or self._carry_autopilot is not None
+        raw_messages = self.comm.get_messages_for_prompt(limit=5, agent_busy=agent_busy)
+
         agent_context = {
             'previous_tasks': self.memory.retrieve_all()[-5:],
-            'other_agents_tasks': None,
+            'other_agents_tasks': other_tasks or None,
             'position': self.WORLD_STATE.get('agent', {}).get('location'),
             'nearby_objects': self.WORLD_STATE.get('victims', []) + self.WORLD_STATE.get('obstacles', []),
             'observed_objects': self.WORLD_STATE_GLOBAL,
             'carrying': self.WORLD_STATE.get('agent', {}).get('carrying'),
-            'rescued_victims': None,
+            'rescued_victims': self._get_rescued_victims(),
             'critic_feedback': self._pipeline_context.get('critic_result'),
+            'area_exploration': self.area_tracker.get_all_summaries(),
+            'messages': [
+                f"[{m['from']}] ({m['message_type']}) {m['text']}"
+                for m in raw_messages
+            ] if raw_messages else None,
         }
         prompt = self.planner.get_planning_prompt(agent_context)
+
+        # P0: Inject capability context so planner doesn't generate infeasible tasks
+        if self._capabilities and self._capability_knowledge == 'informed':
+            cap_text = get_capability_prompt(self._capabilities)
+            prompt[0]['content'] += f"\n\n{cap_text}"
 
         print(f'[{self.agent_id}] Pipeline: PLANNING — generating next task')
         self._submit_llm(prompt)
@@ -247,34 +283,6 @@ class SearchRescueAgent(LLMAgentBase):
         text = getattr(result[0], 'content', '') or ''
         self._pipeline_context['planned_task'] = text.strip()
         print(f'[{self.agent_id}] Planned task: {text.strip()[:100]}')
-
-        self._pipeline_stage = PipelineStage.COMMUNICATION
-        return self._advance_pipeline(None)
-
-    # ── COMMUNICATION stage ─────────────────────────────────────────────
-
-    def _submit_communication(self) -> Tuple[Optional[str], Dict]:
-        messages = self.comm.get_messages_for_prompt(limit=10)
-        if not messages:
-            self._pipeline_context['comm_insights'] = {'summary': 'No messages'}
-            self._pipeline_stage = PipelineStage.REASONING
-            return self._advance_pipeline(None)
-
-        prompt = self.comm.get_communication_prompt(messages)
-
-        print(f'[{self.agent_id}] Pipeline: COMMUNICATION — processing {len(messages)} messages')
-        self._submit_llm(prompt)
-        return self._idle()
-
-    def _handle_communication_result(self, result) -> Tuple[Optional[str], Dict]:
-        text = getattr(result[0], 'content', '') or ''
-        try:
-            comm_insights = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            comm_insights = {'summary': text}
-
-        self._pipeline_context['comm_insights'] = comm_insights
-        print(f'[{self.agent_id}] Comm insights: {comm_insights.get("summary", "")[:80]}')
 
         self._pipeline_stage = PipelineStage.REASONING
         return self._advance_pipeline(None)
@@ -289,23 +297,22 @@ class SearchRescueAgent(LLMAgentBase):
                 k: v for k, v in global_state.items()
                 if k != 'teammate_positions' and v
             }
+        observation['area_exploration'] = self.area_tracker.get_all_summaries()
 
         prompt = self.reasoning.get_reasoning_prompt({
             'task_decomposition': self._pipeline_context.get('planned_task', self._current_task),
             'observation': observation,
-            'all_observations': global_state,
             'memory': self.memory.retrieve_all()[-15:],
-            'communication': self._pipeline_context.get('comm_insights', {}),
             'critic_feedback': self._pipeline_context.get('critic_result'),
         })
 
         # Inject capability info and game rules
         if self._capabilities and self._capability_knowledge == 'informed':
             cap_text = get_capability_prompt(self._capabilities)
-            rules_text = get_game_rules(self._capabilities, drop_zone=self.env_info.drop_zone)
+            rules_text = get_game_rules(self._capabilities, drop_zone=self.env_info.drop_zone, num_victims=self.env_info.num_victims)
             prompt[0]['content'] += f"\n\n{cap_text}\n\n{rules_text}"
         else:
-            rules_text = get_game_rules(drop_zone=self.env_info.drop_zone)
+            rules_text = get_game_rules(drop_zone=self.env_info.drop_zone, num_victims=self.env_info.num_victims)
             prompt[0]['content'] += f"\n\n{rules_text}"
 
         print(f'[{self.agent_id}] Pipeline: REASONING — choosing action')

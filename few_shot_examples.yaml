@@ -49,18 +49,36 @@ generate_tasks:
       area_3,"[15, 4]"
       area_4,"[21, 4]"
       known_obstacles[1]{id,type,location}:
-        rock,big_rock,"[3, 4]"
+        rock_1,big_rock,"[3, 4]"
       teammate_positions:
       rescuebot1[2]: 21,11
       rescuebot0[2]: 22,11
       AGENTS:
-      - rescuebot0
-      - rescuebot1
+      - rescuebot0 (vision: 3, strength: low, medical: low, speed: fast)
+      - rescuebot1 (vision: 1, strength: high, medical: low, speed: normal)
       PREVIOUS_PLAN: None
-  
+
       Assign one task per agent.
     assistant: |
-      {"tasks": {"rescuebot0": "Explore Area 1", "rescuebot1": "Explore Area 2"}}
+      {"tasks": {"rescuebot0": "Explore Area 2 starting from entrance at [9, 4] and search for victims", "rescuebot1": "Remove rock_1 (big_rock) blocking Area 1 entrance at [3, 4] using RemoveObject"}}
+
+# ── Iteration summarization (EnginePlanner / summarize_system) ────────────────
+summarize:
+  - user: |
+      ASSIGNMENTS:
+      tasks:
+        rescuebot0: "Explore Area 1 and search for victims"
+        rescuebot1: "Explore Area 2 and search for victims"
+      RESULTS:
+      rescuebot0: Explore Area 1 -> completed (found mildly_injured_woman at [3, 3])
+      rescuebot1: Explore Area 2 -> ticks_exhausted (partially explored, found stone blocking door)
+      WORLD_STATE:
+      victims[1]{id,type,location}: mildly_injured_woman,mild,"[3, 3]"
+      obstacles[1]{id,type,location}: stone_2,stone,"[9, 4]"
+      SCORE:
+      Victims rescued: 0/8, Score: 0, Block hit rate: 0.0
+    assistant: |
+      rescuebot0 fully explored Area 1, discovering 1 mild victim. rescuebot1 found a stone blocking Area 2 entrance and couldn't complete exploration. Score: 0/8 rescued. Next: rescue the found victim and clear the Area 2 obstruction.
 
 # ── Plan decomposition (PlanningModule / planning_decompose_system) ───────────
 planning_decompose:
@@ -115,11 +133,12 @@ planner_answer:
   - user: |
       AGENT: rescuebot0
       QUESTION: I found a big rock blocking the entrance to area 3. Should I wait for help or explore elsewhere?
-      AGENT CONTEXT: {"position": [14, 4], "task": "Explore Area 3", "memory_summary": "explored areas 1, 2"}
       CURRENT TASKS: {"rescuebot0": "Explore Area 3", "rescuebot1": "Rescue victim_1 in Area 1"}
-      LAST SUMMARY: Iteration 2: rescuebot0 explored Areas 1-2, found 2 mild victims. rescuebot1 rescued victim_1.
-      SCORE: Victims rescued: 1/8, Score: 3, Block hit rate: 0.12
-      ITERATION: 3
+      WORLD_STATE:
+      known_obstacles[1]{id,type,location}:
+        rock_1,big_rock,"[15, 4]"
+      teammate_positions:
+        rescuebot1[2]: 3,3
     assistant: |
       The rock at Area 3 needs cooperative removal. rescuebot1 is busy rescuing in Area 1 — skip Area 3 for now and explore Area 4 at [21, 4] instead. We will coordinate rock removal next iteration.
 
