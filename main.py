@@ -2,7 +2,6 @@ import os, requests
 import sys
 import json
 import pathlib
-from SaR_gui import visualization_server
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from engine.engine_planner import EnginePlanner
@@ -18,6 +17,7 @@ if __name__ == "__main__":
     ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
     num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
     include_human = False        # Whether to add a keyboard-controlled human agent
+    enable_gui = True            # Set to False for headless runs (e.g. Delft Blue)
     ollama_base_port = 11434    # Each agent uses its own Ollama instance: agent N -> port base+N
     planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
 
@@ -51,8 +51,10 @@ if __name__ == "__main__":
     # Start overarching MATRX scripts and threads
     media_folder = pathlib.Path().resolve()
     builder.startup(media_folder=media_folder)
-    print("Starting custom visualizer")
-    vis_thread = visualization_server.run_matrx_visualizer(verbose=False, media_folder=media_folder)
+    if enable_gui:
+        from SaR_gui import visualization_server
+        print("Starting custom visualizer")
+        vis_thread = visualization_server.run_matrx_visualizer(verbose=False, media_folder=media_folder)
     world = builder.get_world()
     print("Started world...")
 
@@ -103,8 +105,9 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Failed to save iteration history: {e}")
 
-    print("Shutting down custom visualizer")
-    r = requests.get("http://localhost:" + str(visualization_server.port) + "/shutdown_visualizer")
-    vis_thread.join()
+    if enable_gui:
+        print("Shutting down custom visualizer")
+        r = requests.get("http://localhost:" + str(visualization_server.port) + "/shutdown_visualizer")
+        vis_thread.join()
     output_logger(fld)
     builder.stop()

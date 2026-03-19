@@ -16,6 +16,7 @@ SharedMemory provides thread-safe inter-agent communication using a simple key-v
 
 The primary SharedMemory use case is cooperative victim transport. When an agent initiates `CarryObjectTogether`, it enters a retry loop (`_handle_carry_retry` in `agents1/llm_agent_base.py`) and publishes to `carry_rendezvous` key with `{agent, victim_id, location, status: 'waiting_for_partner'}`. Other agents poll this key in `_handle_rendezvous()` and navigate to the rendezvous location if status is `waiting_for_partner` and they're not the waiting agent. After delivery or timeout (100 ticks), the key is cleared by setting it to `None`.
 
+Additionally, agents broadcast completed carry/obstacle actions to keys like `victim_{obj_id}` and `obstacle_{obj_id}` via `_maybe_share_observation()`, though these are not actively polled—they serve as a coordination log.
 
 ## Per-Agent Memory
 

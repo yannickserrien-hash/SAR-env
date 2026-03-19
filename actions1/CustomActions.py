@@ -810,17 +810,24 @@ class CarryObjectTogether(Action):
         """
         # Set default values check
         object_id = None if 'object_id' not in kwargs else kwargs['object_id']
-        grab_range = np.inf if 'grab_range' not in kwargs else kwargs['grab_range']
+        grab_range = 1 if 'grab_range' not in kwargs else kwargs['grab_range']
         max_objects = np.inf if 'max_objects' not in kwargs else kwargs['max_objects']
+
+        # Check calling agent is adjacent to the object
+        if object_id:
+            agent_loc = world_state[agent_id]['location']
+            if get_distance(agent_loc, world_state[object_id]['location']) > grab_range:
+                print("GrabObjectResult.NOT_IN_RANGE — agent not adjacent to object.")
+                return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
 
         # Find nearest partner agent (AI or human) for cooperative carry
         partner = _find_partner_agent(world_state, agent_id)
 
         if partner is None:
-            print("GrabObjectResult.NOT_IN_RANGE.")
+            print("GrabObjectResult.NOT_IN_RANGE — no partner found.")
             return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
         if object_id and get_distance(partner['location'], world_state[object_id]['location']) > grab_range:
-            print("GrabObjectResult.NOT_IN_RANGE 2.")
+            print("GrabObjectResult.NOT_IN_RANGE — partner not adjacent to object.")
             return GrabObjectResult(GrabObjectResult.NOT_IN_RANGE, False)
         else:
             print("GrabObjectResult.ACTION_SUCCEEDED.")
@@ -894,9 +901,9 @@ class CarryObjectTogether(Action):
                 ), False
             )
 
-        # 3. Deliver victim atomically to drop zone — no agent movement required
-        return _act_drop(grid_world, agent=reg_ag, env_obj=env_obj,
-                         drop_loc=list(CARRY_DROP_ZONE))
+        # 3. Victim now in agent's inventory — autopilot in LLMAgentBase
+        #    will navigate both agents to drop zone and drop there.
+        return GrabObjectResult(GrabObjectResult.RESULT_SUCCESS, True)
 
 
 class GrabObjectResult(ActionResult):
