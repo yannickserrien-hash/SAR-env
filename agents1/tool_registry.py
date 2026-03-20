@@ -40,17 +40,13 @@ REASONING_STRATEGIES: Dict[str, str] = {
     ),
 }
 
-# Default drop zone location (overridden by env_info at runtime).
-_DEFAULT_DROP_ZONE = (23, 8)
-
-
-def get_game_rules_str(drop_zone=None):
+def get_game_rules_str(drop_zone=(23, 8)):
     """Static fallback game rules. For capability-aware rules, use agents1.capabilities.get_game_rules()."""
-    dz = drop_zone or _DEFAULT_DROP_ZONE
+    dz = drop_zone
     return (
         "Rules:\n"
         f"- Critically injured victims require CarryObjectTogether (both agents).\n"
-        "- Big grey rocks require RemoveObjectTogether (both agents).\n"
+        "- Big rocks require RemoveObjectTogether (both agents).\n"
         "- Trees can only be removed by the rescue robot (RemoveObject).\n"
         "- Small stones can be removed solo (RemoveObject).\n"
         f"- Deliver rescued victims to the drop zone at {dz}.\n"
@@ -142,7 +138,7 @@ def CarryObject(object_id: str, task_completing: str = "carrying victim"):
 
 @tool
 def CarryObjectTogether(object_id: str, task_completing: str = "carrying victim cooperatively"):
-    """Cooperatively carry a critically injured victim or big grey rock with a partner agent.
+    """Cooperatively carry a critically injured victim or big rock with a partner agent.
     Both agents must be adjacent to the object.
 
     Args:
@@ -180,7 +176,7 @@ def RemoveObject(object_id: str, task_completing: str = "removing obstacle"):
 
 @tool
 def RemoveObjectTogether(object_id: str, task_completing: str = "removing obstacle cooperatively"):
-    """Cooperatively remove a big grey rock obstacle with a partner agent.
+    """Cooperatively remove a big rock obstacle with a partner agent.
     Both agents must be adjacent to the rock.
 
     Args:
@@ -200,18 +196,6 @@ def Idle(duration_in_ticks: int = 1):
         duration_in_ticks: Number of ticks to wait (default 1).
     """
     return 'Idle', {'duration_in_ticks': duration_in_ticks}, {'task_completing': f"idling for {duration_in_ticks} ticks"}
-
-@tool
-def SendInfoFromMemory(information: str, memory:Dict[str, Any]):
-    """Retrieve relevant information from memory
-
-    Args:
-        information: A description of the current situation or what information is needed.
-        memory: The agent's memory storage to search through.
-    """
-    # send_message(Message(content=f"Retrieving information from memory: {information}", from_id=self.agent_id))
-    
-    return 'Idle', {'duration_in_ticks': 1} , {'task_completing': f"retrieving information from memory about {information}"}
 
 @tool
 def SendMessage(message: str, send_to: str, message_type: str = "message"):

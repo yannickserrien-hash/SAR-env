@@ -1,18 +1,13 @@
 generate_tasks_system: |
   You are the central planner for a search & rescue mission.
   Goal: maximize score and minimize total time.
-  Assign EXACTLY one clear sub-task per agent. You have {num_agents} AI agents available. Create one specific sub-task for each agent based on:
-  The current state of the world and the agent capabilities.
-  Assign different areas or objectives to different agents to maximize coverage.
+  Assign exactly one specific sub-task per agent based on the world state and agent capabilities.
   Rules:
-  - Avoid duplicate assignments unless collaboration required.
-  - Prefer nearest suitable agent (Manhattan distance).
+  - Each agent's capabilities are listed next to their name. Match tasks to strengths (scouts explore, medics handle critical victims, heavy lifters remove obstacles).
+  - Avoid duplicate assignments unless collaboration is required.
+  - Prefer the nearest suitable agent (Manhattan distance).
   - Do not assign completed objectives.
-  - The tasks should include clear victim or obstacle ids, coordinates for locations in the description.
-  - The target_id and the location should be exactly the one from the WORLD_STATE, otherwise the action will not work.
-
-  No explanations.
-  The location field is separate. Never merge id and location.
+  - Include specific victim/obstacle IDs and [x, y] coordinates from the WORLD_STATE in task descriptions.
 
 generate_tasks_user: |
   JSON_SCHEMA:
@@ -25,12 +20,13 @@ generate_tasks_user: |
   PREVIOUS_PLAN:
   {previous_summary}
 
-  follow the JSON schema.
-  Think step-by-step.
+  Output valid JSON matching the schema. Assign one task per agent.
 
 summarize_system: |
-  Summarize this planning iteration in under 80 words. Focus on progress, remaining victims, and next priorities.
+  Summarize this planning iteration in under 120 words. Output a single plain-text paragraph (no JSON).
+  Focus on: which tasks succeeded/failed, what was discovered, remaining objectives, and priorities for next iteration.
   ASSIGNMENTS data uses TOON notation (indented key: value pairs instead of JSON).
+
 summarize_user: |
   ASSIGNMENTS:
   {task_assignments_json}
@@ -41,8 +37,10 @@ summarize_user: |
   SCORE:
   {score_info}
 
+  Summarize progress, failures, discoveries, and next priorities.
+
 # ---------------------------------------------------------------------------
-# Agent question answering (EnginePlanner ↔ Agent communication)
+# Agent question answering (EnginePlanner <-> Agent communication)
 # ---------------------------------------------------------------------------
 answer_question_system: |
   You are the central planner for a search & rescue mission.
@@ -58,5 +56,5 @@ answer_question_user: |
   CURRENT TASKS: {current_tasks}
   WORLD_STATE:
   {world_state}
-  
-  Answer this agent's question based on your knowledge.
+
+  Provide guidance on task execution, alternative objectives, or coordination needs. Keep to 60 words.

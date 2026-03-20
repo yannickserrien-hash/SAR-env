@@ -268,12 +268,15 @@ class EnginePlanner:
         if self._manual_data is not None:
             return self._build_manual_tasks(agent_ids)
 
-        # Build a formatted agent listing for the prompt
+        # Build a formatted agent listing for the prompt (include capabilities if available)
         agent_lines = []
-        for aid in agent_ids:
-            agent_lines.append(
-                f"  - {aid}"
-            )
+        for i, aid in enumerate(agent_ids):
+            caps = getattr(agents[i], '_capabilities', None) if i < len(agents) else None
+            if caps:
+                cap_str = ', '.join(f"{k}: {v}" for k, v in caps.items())
+                agent_lines.append(f"  - {aid} ({cap_str})")
+            else:
+                agent_lines.append(f"  - {aid}")
         agent_ids_formatted = '\n'.join(agent_lines)
         agent_tasks_schema = ', '.join(f'"{aid}": "task for {aid}"' for aid in agent_ids)
 

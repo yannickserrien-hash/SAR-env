@@ -67,6 +67,14 @@ logger = logging.getLogger('LLMAgentBase')
 MAX_NR_TOKENS: int = 3000
 TEMPERATURE: float = 0.3
 CARRY_WAIT_TIMEOUT_TICKS: int = 100
+NEGOTIATION_STALL_TICKS: int = 20  # ticks before lower-ID agent yields in dual help-request deadlock
+
+# SharedMemory key templates
+SM_HELP_REQUEST = 'help_request_{}'
+SM_CARRY_AUTOPILOT = 'carry_autopilot'
+SM_CARRY_RENDEZVOUS = 'carry_rendezvous'
+SM_CARRY_NOTIFICATION = 'carry_notification_{}'
+SM_TASK_ASSIGNMENTS = 'current_task_assignments'
 
 # ── Base class ─────────────────────────────────────────────────────────────────
 
@@ -119,8 +127,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         # ── Environment info ─────────────────────────────────────────────
         self.env_info: EnvironmentInformation = env_info or EnvironmentInformation()
-        # Update Perception mixin's drop zone from env_info
-        Perception.set_drop_zone(self.env_info.drop_zone)
 
         # ── Capabilities ──────────────────────────────────────────────────
         self._capabilities = capabilities
@@ -130,6 +136,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._validator = ActionValidator(
             capabilities=capabilities,
             capability_knowledge=capability_knowledge,
+            grid_size=self.env_info.grid_size,
+            valid_areas=frozenset(self.env_info.areas.keys()) if self.env_info.areas else None,
         )
 
         # ── Communication ─────────────────────────────────────────────────
@@ -151,7 +159,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
         # ── Async LLM state ────────────────────────────────────────────────
         self._pending_future: Optional[Future] = None
-        self._reasoning_step: bool = True
+        self._should_reason: bool = True
 
         # ── Task ───────────────────────────────────────────────────────────
         self._current_task: Optional[str] = None
@@ -241,7 +249,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._current_task = task
         self._pending_future = None
         self._nav_target = None
-        self._reasoning_step = True
+        self._should_reason = True
         self._pending_carry_kwargs = None
         self._carry_wait_ticks = 0
         self.planner.update_current_task(task)
@@ -354,21 +362,15 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 'role': 'carrier',
             }
             if self.shared_memory:
-                self.shared_memory.update('carry_rendezvous', None)
-                self.shared_memory.update('carry_autopilot', {
+                self.shared_memory.update(SM_CARRY_RENDEZVOUS, None)
+                self.shared_memory.update(SM_CARRY_AUTOPILOT, {
                     'carrier': self.agent_id,
                     'victim_id': obj_id,
                     'destination': dest,
                 })
-                # Clear any lingering help request
-                self.shared_memory.update(f'help_request_{self.agent_id}', None)
-            # Start navigation to drop zone
-            self._navigator.reset_full()
-            self._navigator.add_waypoints([dest])
-            self._nav_target = dest
-            self._reasoning_step = False  # stay in infrastructure mode
-            move = self._navigator.get_move_action(self._state_tracker)
-            return (move, {}) if move else self._idle()
+                self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
+            self._should_reason = False  # stay in infrastructure mode
+            return self._navigate_to(dest)
 
         self._carry_wait_ticks += 1
         if self._carry_wait_ticks > CARRY_WAIT_TIMEOUT_TICKS:
@@ -386,21 +388,17 @@ class LLMAgentBase(ArtificialBrain, Perception):
             self._pending_carry_kwargs = None
             self._carry_wait_ticks = 0
             if self.shared_memory:
-                self.shared_memory.update('carry_rendezvous', None)
-                self.shared_memory.update(f'help_request_{self.agent_id}', None)
+                self.shared_memory.update(SM_CARRY_RENDEZVOUS, None)
+                self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
             self._negotiation_ticks = 0
-            self._reasoning_step = True
+            self._should_reason = True
             return self._idle()
 
         if self.shared_memory:
-            agent_loc = (
-                self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
-                if isinstance(self.WORLD_STATE, dict) else [0, 0]
-            )
-            self.shared_memory.update('carry_rendezvous', {
+            self.shared_memory.update(SM_CARRY_RENDEZVOUS, {
                 'agent': self.agent_id,
                 'victim_id': obj_id,
-                'location': agent_loc,
+                'location': self.agent_location,
                 'status': 'waiting_for_partner',
             })
         print(f'[{self.agent_id}] Carry retry {self._carry_wait_ticks}/{CARRY_WAIT_TIMEOUT_TICKS}')
@@ -428,19 +426,19 @@ class LLMAgentBase(ArtificialBrain, Perception):
             })
             self._carry_autopilot = None
             if self.shared_memory:
-                self.shared_memory.update('carry_autopilot', None)
-            self._reasoning_step = True
+                self.shared_memory.update(SM_CARRY_AUTOPILOT, None)
+            self._should_reason = True
             return _DropObject.__name__, {'object_id': victim_id}
 
         if self._carry_autopilot and self._carry_autopilot['role'] == 'partner':
             # Check if carrier already finished (signal cleared)
             if self.shared_memory:
-                ap = self.shared_memory.retrieve('carry_autopilot')
+                ap = self.shared_memory.retrieve(SM_CARRY_AUTOPILOT)
                 if ap is None:
                     # Carrier done — clear own autopilot
                     print(f'[{self.agent_id}] Autopilot: carrier finished, resuming pipeline')
                     self._carry_autopilot = None
-                    self._reasoning_step = True
+                    self._should_reason = True
                     return self._idle()
             if self._nav_target is not None:
                 return None  # still navigating
@@ -451,25 +449,20 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 'status': 'delivered',
             })
             self._carry_autopilot = None
-            self._reasoning_step = True
+            self._should_reason = True
             return self._idle()
 
         # ── Partner detection: check if another agent initiated autopilot ─
         if not self.shared_memory:
             return None
-        ap = self.shared_memory.retrieve('carry_autopilot')
+        ap = self.shared_memory.retrieve(SM_CARRY_AUTOPILOT)
         if not ap or ap.get('carrier') == self.agent_id:
             return None
 
         # Another agent is carrying to drop zone — join as partner
         dest = tuple(ap['destination'])
-        my_loc = (
-            self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
-            if isinstance(self.WORLD_STATE, dict) else [0, 0]
-        )
-        if self._is_within_range(tuple(my_loc), dest, radius=1):
-            # Already at drop zone
-            return None
+        if self._is_within_range(self.agent_location, dest, radius=1):
+            return None  # Already at drop zone
 
         print(f'[{self.agent_id}] Autopilot: joining partner carry to drop zone {dest}')
         self._carry_autopilot = {
@@ -478,21 +471,16 @@ class LLMAgentBase(ArtificialBrain, Perception):
             'role': 'partner',
         }
         self._pending_future = None  # cancel any pending LLM call
-        self._reasoning_step = False
-        self._navigator.reset_full()
-        self._navigator.add_waypoints([dest])
-        self._nav_target = dest
-        # Clear own help request if any
+        self._should_reason = False
         if self.shared_memory:
-            self.shared_memory.update(f'help_request_{self.agent_id}', None)
-        move = self._navigator.get_move_action(self._state_tracker)
-        return (move, {}) if move else self._idle()
+            self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
+        return self._navigate_to(dest)
 
     def _check_carry_notifications(self) -> None:
         """Check if we were recruited into a carry and store in memory."""
         if not self.shared_memory:
             return
-        key = f'carry_notification_{self.agent_id}'
+        key = SM_CARRY_NOTIFICATION.format(self.agent_id)
         notification = self.shared_memory.retrieve(key)
         if notification:
             self.memory.update('carry_participation', notification)
@@ -508,7 +496,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # Destination reached
         self._nav_target = None
         if not self._carry_autopilot:
-            self._reasoning_step = True
+            self._should_reason = True
         return None
 
     def _handle_rendezvous(self) -> Optional[Tuple[str, Dict]]:
@@ -522,35 +510,26 @@ class LLMAgentBase(ArtificialBrain, Perception):
             return None
 
         # ── Carry rendezvous (partner is retrying CarryObjectTogether) ────
-        rendezvous = self.shared_memory.retrieve('carry_rendezvous')
+        rendezvous = self.shared_memory.retrieve(SM_CARRY_RENDEZVOUS)
         if (
             rendezvous
             and rendezvous.get('agent') != self.agent_id
             and rendezvous.get('status') == 'waiting_for_partner'
         ):
             target = tuple(rendezvous['location'])
-            my_loc = (
-                self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
-                if isinstance(self.WORLD_STATE, dict) else [0, 0]
-            )
-            if not self._is_within_range(tuple(my_loc), target, radius=1):
-                self._navigator.reset_full()
-                self._navigator.add_waypoints([target])
-                self._nav_target = target
+            if not self._is_within_range(self.agent_location, target, radius=1):
                 self._pending_future = None
-                move = self._navigator.get_move_action(self._state_tracker)
                 print(f'[{self.agent_id}] Navigating to carry rendezvous at {target}')
-                return (move, {}) if move else self._idle()
+                return self._navigate_to(target)
 
         # ── Help request (partner asked for help via SendMessage) ─────────
         # Only respond if we do NOT have our own pending help request
-        own_request = self.shared_memory.retrieve(f'help_request_{self.agent_id}')
+        own_request = self.shared_memory.retrieve(SM_HELP_REQUEST.format(self.agent_id))
         if own_request:
             # Both agents need help — let LLM negotiate, don't auto-navigate.
-            # Safeguard: if negotiation stalls 20+ ticks, lower ID agent yields.
+            # Safeguard: after NEGOTIATION_STALL_TICKS, lower ID agent yields.
             self._negotiation_ticks += 1
-            if self._negotiation_ticks > 20:
-                # Find the other agent's help request
+            if self._negotiation_ticks > NEGOTIATION_STALL_TICKS:
                 all_mem = self.shared_memory.retrieve_all()
                 other_requests = [
                     (k, v) for k, v in all_mem.items()
@@ -558,9 +537,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
                     and v is not None and v.get('agent') != self.agent_id
                 ]
                 if other_requests and self.agent_id < other_requests[0][1]['agent']:
-                    # Lower ID yields: clear own request, go help the other agent
                     print(f'[{self.agent_id}] Negotiation timeout — yielding to help other agent')
-                    self.shared_memory.update(f'help_request_{self.agent_id}', None)
+                    self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
                     self._negotiation_ticks = 0
                     # Fall through to the help request scan below
                 else:
@@ -579,19 +557,11 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 and val.get('status') == 'waiting'
             ):
                 target = tuple(val['location'])
-                my_loc = (
-                    self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
-                    if isinstance(self.WORLD_STATE, dict) else [0, 0]
-                )
-                if self._is_within_range(tuple(my_loc), target, radius=1):
+                if self._is_within_range(self.agent_location, target, radius=1):
                     return None  # already adjacent
-                self._navigator.reset_full()
-                self._navigator.add_waypoints([target])
-                self._nav_target = target
                 self._pending_future = None
-                move = self._navigator.get_move_action(self._state_tracker)
                 print(f'[{self.agent_id}] Navigating to help request from {val["agent"]} at {target}')
-                return (move, {}) if move else self._idle()
+                return self._navigate_to(target)
 
         return None
 
@@ -604,7 +574,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         except Exception as exc:
             logger.warning('[%s] LLM future raised: %s', self.agent_id, exc)
             self._pending_future = None
-            self._reasoning_step = True
+            self._should_reason = True
             return self._idle()
 
         if result is None:
@@ -647,7 +617,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
             raw_name, raw_args = self._mapper.parse_raw(llm_text)
             if raw_name is None:
-                self._reasoning_step = True
+                self._should_reason = True
                 return self._idle()
 
             if (check := self._validate_action(raw_name, raw_args)) is not None:
@@ -667,37 +637,22 @@ class LLMAgentBase(ArtificialBrain, Perception):
         """Set up A* navigation for MoveTo / NavigateToDropZone.
         All other actions are passed through unchanged.
         """
-        self._reasoning_step = True
+        self._should_reason = True
 
         if action_name == 'MoveTo':
             coords = (int(kwargs.get('x', 0)), int(kwargs.get('y', 0)))
-            self._navigator.reset_full()
-            self._navigator.add_waypoints([coords])
-            self._nav_target = coords
-            move = self._navigator.get_move_action(self._state_tracker)
-            return (move, {}) if move else self._idle()
+            return self._navigate_to(coords)
 
         if action_name == 'NavigateToDropZone':
-            coords = self.env_info.drop_zone
-            self._navigator.reset_full()
-            self._navigator.add_waypoints([coords])
-            self._nav_target = coords
-            move = self._navigator.get_move_action(self._state_tracker)
-            return (move, {}) if move else self._idle()
-        
+            return self._navigate_to(self.env_info.drop_zone)
+
         if action_name == 'MoveToArea':
             target = int(kwargs.get('area', 0))
-            self._navigator.reset_full()
             door = self.env_info.get_door(target)
             if door is None:
                 self.memory.update("action_failure", f"Area {target} does not exist. Try a different one.")
-                self._reasoning_step = True
                 return self._idle()
-            print(f"Door: {door}")
-            self._navigator.add_waypoints([door])
-            self._nav_target = door
-            move = self._navigator.get_move_action(self._state_tracker)
-            return (move, {}) if move else self._idle()
+            return self._navigate_to(door)
 
         if action_name == 'EnterArea':
             target = int(kwargs.get('area', 0))
@@ -711,8 +666,12 @@ class LLMAgentBase(ArtificialBrain, Perception):
             # Teammate adjacency already validated by ActionValidator
             self._pending_carry_kwargs = dict(kwargs)
             self._carry_wait_ticks = 0
-            self._reasoning_step = False
+            self._should_reason = False
+            self._clear_partner_help_requests()
             return action_name, kwargs
+
+        if action_name == _RemoveObjectTogether.__name__:
+            self._clear_partner_help_requests()
 
         return action_name, kwargs
 
@@ -748,7 +707,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
                 if isinstance(self.WORLD_STATE, dict) else [0, 0]
             )
-            self.shared_memory.update(f'help_request_{self.agent_id}', {
+            self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), {
                 'agent': self.agent_id,
                 'location': agent_loc,
                 'message': text,
@@ -756,8 +715,19 @@ class LLMAgentBase(ArtificialBrain, Perception):
             })
             print(f'[{self.agent_id}] Published help request to SharedMemory')
 
-        self._reasoning_step = True
+        self._should_reason = True
         return self._idle()
+
+    def _clear_partner_help_requests(self) -> None:
+        """Clear partner help requests from SharedMemory after cooperative action dispatch."""
+        if not self.shared_memory:
+            return
+        all_mem = self.shared_memory.retrieve_all()
+        for key, val in all_mem.items():
+            if (isinstance(key, str) and key.startswith('help_request_')
+                    and val and val.get('agent') != self.agent_id):
+                self.shared_memory.update(key, None)
+                print(f'[{self.agent_id}] Cleared help request from {val.get("agent")}')
 
     # ── Action validation ─────────────────────────────────────────────────
 
@@ -774,7 +744,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         if result.valid:
             return None
         self.memory.update("action_failure", result.feedback)
-        self._reasoning_step = True
+        self._should_reason = True
         return self._idle()
 
     # ── LLM submission ────────────────────────────────────────────────────
@@ -795,7 +765,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             tool_choice=tool_choice if tools else 'none',
             api_base=self._api_base,
         )
-        self._reasoning_step = False
+        self._should_reason = False
 
     # ── Messaging ─────────────────────────────────────────────────────────
 
@@ -808,6 +778,21 @@ class LLMAgentBase(ArtificialBrain, Perception):
             self.send_message(msg)
 
     # ── Utilities ─────────────────────────────────────────────────────────
+
+    @property
+    def agent_location(self) -> Tuple[int, int]:
+        """Current agent (x, y) from world state."""
+        if isinstance(self.WORLD_STATE, dict):
+            return tuple(self.WORLD_STATE.get('agent', {}).get('location', (0, 0)))
+        return (0, 0)
+
+    def _navigate_to(self, target: Tuple[int, int]) -> Tuple[str, Dict]:
+        """Reset navigator and begin A* navigation to target."""
+        self._navigator.reset_full()
+        self._navigator.add_waypoints([target])
+        self._nav_target = target
+        move = self._navigator.get_move_action(self._state_tracker)
+        return (move, {}) if move else self._idle()
 
     def _idle(self) -> Tuple[str, Dict]:
         """Convenience: return an Idle action."""

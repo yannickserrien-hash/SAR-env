@@ -2,9 +2,6 @@ import os
 import sys
 import json
 import numpy as np
-import itertools
-from collections import OrderedDict
-from itertools import product
 from matrx import WorldBuilder
 from matrx.actions import MoveNorth, OpenDoorAction, CloseDoorAction, GrabObject
 from matrx.actions.move_actions import MoveEast, MoveSouth, MoveWest
@@ -13,9 +10,7 @@ from matrx.grid_world import GridWorld, AgentBody
 from actions1.CustomActions import RemoveObjectTogether, DropObject, Idle, CarryObject, Drop, CarryObjectTogether, DropObjectTogether
 from matrx.actions.object_actions import RemoveObject
 from matrx.objects import EnvObject
-from matrx.world_builder import RandomProperty
 from matrx.goals import WorldGoal
-from agents1.agents_graveyard.RescueAgent import RescueAgent
 from agents1.search_rescue_agent import SearchRescueAgent
 from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
@@ -24,7 +19,6 @@ from worlds1.world_presets import (
     get_preset, to_areas_raw, generate_roof_tiles, generate_street_tiles,
     WorldPreset,
 )
-from actions1.CustomActions import RemoveObjectTogether
 from brains1.HumanBrain import HumanBrain
 from loggers.ActionLogger import ActionLogger
 from datetime import datetime
@@ -111,7 +105,6 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
     sense_capability_human = SenseCapability({AgentBody: agent_sense_range, CollectableBlock: object_sense_range, None: other_sense_range, ObstacleObject: 1})
 
     agents = []
-    shared_message_log = []  # shared across all agents for the entire game
     # Shared memory for MARBLE agents (thread-safe, one instance per run)
     marble_shared_memory = SharedMemory()
     for team in range(nr_teams):
@@ -129,14 +122,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                 ObstacleObject: caps['vision'],
             })
 
-            if agent_type == 'llm':
-                brain = RescueAgent(slowdown=8, condition=condition, name=name, folder=folder,
-                                    llm_model='qwen2.5:3b', include_human=include_human,
-                                    ollama_port=ollama_base_port + agent_nr + 1,
-                                    shared_message_log=shared_message_log)
-                agents.append(brain)
-                print(f"[WorldBuilder] Using LLM Agent '{agent_name}' (RescueAgent with modular architecture)")
-            elif agent_type == 'marble':
+            if agent_type == 'marble':
                 agent_api_base = f"http://localhost:{ollama_base_port + agent_nr}"
                 brain = SearchRescueAgent(
                     slowdown=8,

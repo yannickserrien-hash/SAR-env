@@ -5,14 +5,6 @@ class Perception:
     """Converts a filtered MATRX WorldState dict to an LLM-friendly dict
     that can be passed to to_toon() for token-efficient prompting."""
 
-    # Default drop zone coordinates (overridden via set_drop_zone at agent init)
-    DROP_ZONE_LOCATION: Tuple[int, int] = (23, 8)
-
-    @classmethod
-    def set_drop_zone(cls, location: Tuple[int, int]):
-        """Update the drop zone location (called once at agent init from env_info)."""
-        cls.DROP_ZONE_LOCATION = location
-
     def percept_state(
         self,
         state: Dict[str, Any],

@@ -384,6 +384,14 @@ class GridWorld:
                             task = agent_tasks.get(aid, "Explore Area 1")
                             agent.set_current_task(task)
 
+                    # Store task assignments in SharedMemory so agents can see each other's tasks
+                    if agent_tasks:
+                        for agent in agents:
+                            sm = getattr(agent, 'shared_memory', None)
+                            if sm is not None:
+                                sm.update('current_task_assignments', agent_tasks)
+                                break  # all agents share the same SharedMemory instance
+
                     # Dispatch manual plans if provided (must come after set_current_task)
                     agent_plans = task_assignments.get('plans', {})
                     for agent in agents:

@@ -22,7 +22,7 @@ Usage:
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -38,10 +38,6 @@ _OK = ValidationResult(valid=True)
 class ActionValidator:
     """Pre-dispatch validation for all LLM-chosen actions."""
 
-    GRID_WIDTH = 25
-    GRID_HEIGHT = 24
-    VALID_AREAS = frozenset(range(1, 8))  # areas 1-7
-
     _OBJECT_TYPES = frozenset({'victim', 'tree', 'rock', 'stone'})
     _VICTIM_TYPES = frozenset({'victim'})
     _OBSTACLE_TYPES = frozenset({'tree', 'rock', 'stone'})
@@ -50,9 +46,13 @@ class ActionValidator:
         self,
         capabilities: Optional[Dict[str, Any]] = None,
         capability_knowledge: str = 'informed',
+        grid_size: Tuple[int, int] = (25, 24),
+        valid_areas: Optional[FrozenSet[int]] = None,
     ):
         self._caps = capabilities or {}
         self._informed = capability_knowledge == 'informed'
+        self.GRID_WIDTH, self.GRID_HEIGHT = grid_size
+        self.VALID_AREAS: FrozenSet[int] = valid_areas or frozenset(range(1, 8))
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -74,33 +74,32 @@ class ActionValidator:
 
     # ── Movement ──────────────────────────────────────────────────────────
 
-    def _validate_move_north(self, args, ws, teammates):
+    _MOVE_CHECKS = {
+        'MoveNorth': (lambda loc, h, w: loc[1] <= 0, 'north', 'top'),
+        'MoveSouth': (lambda loc, h, w: loc[1] >= h - 1, 'south', 'bottom'),
+        'MoveEast':  (lambda loc, h, w: loc[0] >= w - 1, 'east', 'right'),
+        'MoveWest':  (lambda loc, h, w: loc[0] <= 0, 'west', 'left'),
+    }
+
+    def _validate_directional_move(self, args, ws, teammates, *, direction: str):
+        check_fn, dir_name, edge_name = self._MOVE_CHECKS[direction]
         loc = self._agent_location(ws)
-        if loc and loc[1] <= 0:
+        if loc and check_fn(loc, self.GRID_HEIGHT, self.GRID_WIDTH):
             return ValidationResult(False,
-                'Cannot move north — already at the top edge of the grid.')
+                f'Cannot move {dir_name} — already at the {edge_name} edge of the grid.')
         return _OK
+
+    def _validate_move_north(self, args, ws, teammates):
+        return self._validate_directional_move(args, ws, teammates, direction='MoveNorth')
 
     def _validate_move_south(self, args, ws, teammates):
-        loc = self._agent_location(ws)
-        if loc and loc[1] >= self.GRID_HEIGHT - 1:
-            return ValidationResult(False,
-                'Cannot move south — already at the bottom edge of the grid.')
-        return _OK
+        return self._validate_directional_move(args, ws, teammates, direction='MoveSouth')
 
     def _validate_move_east(self, args, ws, teammates):
-        loc = self._agent_location(ws)
-        if loc and loc[0] >= self.GRID_WIDTH - 1:
-            return ValidationResult(False,
-                'Cannot move east — already at the right edge of the grid.')
-        return _OK
+        return self._validate_directional_move(args, ws, teammates, direction='MoveEast')
 
     def _validate_move_west(self, args, ws, teammates):
-        loc = self._agent_location(ws)
-        if loc and loc[0] <= 0:
-            return ValidationResult(False,
-                'Cannot move west — already at the left edge of the grid.')
-        return _OK
+        return self._validate_directional_move(args, ws, teammates, direction='MoveWest')
 
     def _validate_move_to(self, args, ws, teammates):
         x = args.get('x')
@@ -133,7 +132,7 @@ class ActionValidator:
                 f'Area must be an integer, got {area}.')
         if area not in self.VALID_AREAS:
             return ValidationResult(False,
-                f'Area {area} does not exist. Valid areas: 1-7.')
+                f'Area {area} does not exist. Valid areas: {sorted(self.VALID_AREAS)}.')
         return _OK
 
     # ── Carry ─────────────────────────────────────────────────────────────
