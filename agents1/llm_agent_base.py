@@ -281,7 +281,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self.WORLD_STATE = self.percept_state(
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
-        self.update_state_belief(filtered_state)
+        self.update_world_belief(filtered_state)
         self.comm.process_messages(self.received_messages)
 
     def _run_infra(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
