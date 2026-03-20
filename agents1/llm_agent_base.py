@@ -138,6 +138,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             capability_knowledge=capability_knowledge,
             grid_size=self.env_info.grid_size,
             valid_areas=frozenset(self.env_info.areas.keys()) if self.env_info.areas else None,
+            env_info=self.env_info,
         )
 
         # ── Communication ─────────────────────────────────────────────────
@@ -661,6 +662,34 @@ class LLMAgentBase(ArtificialBrain, Perception):
                 return ('MoveNorth', {})
             if direction == 'South':
                 return ('MoveSouth', {})
+
+        if action_name == 'SearchArea':
+            area_id = int(kwargs.get('area', 0))
+            area_meta = self.env_info.areas.get(area_id)
+            if area_meta is None:
+                self.memory.update("action_failure", f"Area {area_id} does not exist.")
+                return self._idle()
+            # Build serpentine (boustrophedon) waypoint order through inside cells
+            cells = sorted(area_meta.inside_cells)
+            rows: dict = {}
+            for x, y in cells:
+                rows.setdefault(y, []).append(x)
+            ordered = []
+            for i, y in enumerate(sorted(rows.keys())):
+                xs = sorted(rows[y], reverse=(i % 2 == 1))
+                for x in xs:
+                    ordered.append((x, y))
+            # End at the door
+            if area_meta.door:
+                ordered.append(area_meta.door)
+            if not ordered:
+                return self._idle()
+            self._navigator.reset_full()
+            self._navigator.add_waypoints(ordered)
+            self._nav_target = ordered[-1]
+            self._should_reason = False
+            move = self._navigator.get_move_action(self._state_tracker)
+            return (move, {}) if move else self._idle()
 
         if action_name == _CarryObjectTogether.__name__:
             # Teammate adjacency already validated by ActionValidator

@@ -21,6 +21,13 @@ RESPONSE:
 {"reasoning": "At [3, 5], carrying the victim, no objects nearby. CarryObject succeeded.", "success": true, "critique": ""}
 
 INPUT:
+Position: [3,5], Carrying: None, Nearby: mildly_injured_woman [3, 7]
+Last action: CarryObject(object_id="mildly_injured_woman")
+Task: Pick up victim at location [3, 7]
+RESPONSE:
+{"reasoning": "You are not carrying the victim that you included int the CarryObject action.", "success": false, "critique": "You are too far away from the victim. Move closer"}
+
+INPUT:
 Position: [3,5], Carrying: None, Nearby: mildly_injured_woman
 Last action: CarryObject(object_id="mildly_injured_woman")
 Task: Pick up victim at location [3, 5]

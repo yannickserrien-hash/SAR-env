@@ -198,6 +198,19 @@ def Idle(duration_in_ticks: int = 1):
     return 'Idle', {'duration_in_ticks': duration_in_ticks}, {'task_completing': f"idling for {duration_in_ticks} ticks"}
 
 @tool
+def SearchArea(area: int, task_completing: str = "searching area"):
+    """Systematically search all cells inside an area for victims and obstacles.
+    You must be at the door of the area before calling this action.
+    The agent will visit every cell in the area and return to the door.
+
+    Args:
+        area: The number of the area to search (1-14).
+        task_completing: Description of the subtask being completed.
+    """
+    return 'SearchArea', {'area': area}, {'task_completing': task_completing}
+
+
+@tool
 def SendMessage(message: str, send_to: str, message_type: str = "message"):
     """Send a message to one or all teammates. This uses your action for this tick.
 
@@ -213,7 +226,7 @@ def SendMessage(message: str, send_to: str, message_type: str = "message"):
 # Ordered list of every action tool — used to build the registry + LLM schemas.
 ALL_ACTION_TOOLS = [
     MoveNorth, MoveSouth, MoveEast, MoveWest,
-    MoveTo, NavigateToDropZone, MoveToArea, EnterArea,
+    MoveTo, NavigateToDropZone, MoveToArea, EnterArea, SearchArea,
     CarryObject, CarryObjectTogether,
     Drop, DropObjectTogether,
     RemoveObject, RemoveObjectTogether,
@@ -245,7 +258,5 @@ def build_tool_schemas() -> Tuple[Dict[str, Any], List[Dict]]:
         logger.warning(
             "convert_to_openai_tool failed (%s); using matrx_tool_description fallback", exc
         )
-        from agents1.agents_graveyard.matrx_tool_description import ALL_TOOLS
-        tool_schemas = ALL_TOOLS
 
     return tools_by_name, tool_schemas

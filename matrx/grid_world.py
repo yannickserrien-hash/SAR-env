@@ -286,7 +286,7 @@ class GridWorld:
                 break
 
 ###### PLANNER RUN
-    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=600, include_human=True):
+    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=2000, include_human=True):
         """
         Run GridWorld with MARBLE-style planning loop.
 

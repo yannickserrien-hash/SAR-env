@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
     # Agent capability presets — one per agent (cycles if fewer than num_rescue_agents)
     # Available: 'scout', 'medic', 'heavy_lifter', 'generalist', or custom dicts
-    agent_presets = ['scout', 'medic']
+    agent_presets = ['generalist', 'generalist']
     # Whether agents know their capabilities upfront or discover through failure
     capability_knowledge = 'informed'  # 'informed' | 'discovery'
 
@@ -34,12 +34,12 @@ if __name__ == "__main__":
     comm_strategies = ['always_respond', 'always_respond']
 
     # World preset: 'static' (current world), 'preset2' (2 houses), 'preset3' (2 big houses), 'random'
-    world_preset = 'static'
+    world_preset = 'preset2'
     world_seed = None            # int for reproducibility, None for random each run
 
     # Set to a YAML file path to override LLM task/plan generation with manual inputs.
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
-    manual_plans_file = "manual_plans.yaml"  # e.g. "manual_plans.yaml"
+    manual_plans_file = None  # e.g. "manual_plans.yaml"
 
     # Scale LLM thread pool for the number of agents
     init_marble_pool(num_rescue_agents)

@@ -48,11 +48,13 @@ class ActionValidator:
         capability_knowledge: str = 'informed',
         grid_size: Tuple[int, int] = (25, 24),
         valid_areas: Optional[FrozenSet[int]] = None,
+        env_info: Optional[Any] = None,
     ):
         self._caps = capabilities or {}
         self._informed = capability_knowledge == 'informed'
         self.GRID_WIDTH, self.GRID_HEIGHT = grid_size
         self.VALID_AREAS: FrozenSet[int] = valid_areas or frozenset(range(1, 8))
+        self._env_info = env_info
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -133,6 +135,33 @@ class ActionValidator:
         if area not in self.VALID_AREAS:
             return ValidationResult(False,
                 f'Area {area} does not exist. Valid areas: {sorted(self.VALID_AREAS)}.')
+        return _OK
+
+    # ── SearchArea ────────────────────────────────────────────────────────
+
+    def _validate_search_area(self, args, ws, teammates):
+        # First check area is valid (reuse existing logic)
+        result = self._validate_area_action(args, ws, teammates)
+        if not result.valid:
+            return result
+
+        area = int(args.get('area'))
+
+        # Check agent is at or adjacent to the door of this area
+        if self._env_info is None:
+            return _OK  # can't validate without env_info
+        door = self._env_info.get_door(area)
+        if door is None:
+            return _OK
+        agent_loc = self._agent_location(ws)
+        if agent_loc is None:
+            return _OK
+        dx = abs(agent_loc[0] - door[0])
+        dy = abs(agent_loc[1] - door[1])
+        if max(dx, dy) > 1:
+            return ValidationResult(False,
+                f"You must be at the door of area {area} to search it. "
+                f"Use MoveToArea({area}) to navigate to the door first.")
         return _OK
 
     # ── Carry ─────────────────────────────────────────────────────────────
@@ -302,6 +331,7 @@ class ActionValidator:
         'NavigateToDropZone': _validate_navigate_to_drop_zone,
         'MoveToArea': _validate_area_action,
         'EnterArea': _validate_area_action,
+        'SearchArea': _validate_search_area,
         'CarryObject': _validate_carry_object,
         'CarryObjectTogether': _validate_carry_object_together,
         'Drop': _validate_drop,

@@ -74,6 +74,9 @@ def execute_action(
     if name == "EnterArea":
         return 'EnterArea', {'area': args.get('area', 1)}, task_completing
 
+    if name == "SearchArea":
+        return 'SearchArea', {'area': args.get('area', 1)}, task_completing
+
     if name == 'NavigateToDropZone':
         return 'NavigateToDropZone', {}, task_completing
 

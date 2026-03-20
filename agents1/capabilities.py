@@ -26,7 +26,7 @@ CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
         'vision': 1,
         'strength': 'low',
         'medical': 'high',
-        'speed': 'medium',
+        'speed': 'normal',
     },
     'heavy_lifter': {
         'vision': 1,
@@ -35,7 +35,7 @@ CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
         'speed': 'normal',
     },
     'generalist': {
-        'vision': 2,
+        'vision': 1,
         'strength': 'medium',
         'medical': 'low',
         'speed': 'normal',

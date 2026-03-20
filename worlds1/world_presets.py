@@ -144,7 +144,7 @@ def _place_obstacles_at_doors(rooms: List[RoomDef], rng: random.Random, probabil
         if rng.random() < probability:
             obs_name, obs_img = rng.choice(OBSTACLE_POOL)
             room.obstacles.append(ObstacleDef(
-                name=obs_name, img=obs_img, location=room.door
+                name=obs_name, img=obs_img, location=[room.door[0], room.door[1]-1]
             ))
 
 
@@ -254,10 +254,7 @@ def preset_static(seed=None, **kwargs) -> WorldPreset:
     rooms[0].victims = [VictimDef('mildly injured boy', '/images/mildly injured boy.svg', (2, 2), 'area 1')]
     rooms[1].victims = [VictimDef('critically injured girl', '/images/critically injured girl.svg', (10, 3), 'area 2')]
     rooms[5].victims = [VictimDef('critically injured dog', '/images/critically injured dog.svg', (8, 9), 'area 6')]
-    rooms[6].victims = [
-        VictimDef('mildly injured woman', '/images/mildly injured woman.svg', (22, 11), 'area 7'),
-        VictimDef('mildly injured woman', '/images/mildly injured woman.svg', (14, 8), 'area 7'),
-    ]
+    rooms[6].victims = [VictimDef('mildly injured woman', '/images/mildly injured woman.svg', (14, 8), 'area 7')]
 
     ghost_victims = [
         ('critically injured girl', '/images/critically injured girl.svg'),
@@ -330,29 +327,69 @@ def preset_static(seed=None, **kwargs) -> WorldPreset:
 
 def preset_2_houses(seed=None, num_victims=3, **kwargs) -> WorldPreset:
     """Two small 5x4 houses with configurable victims."""
-    rng = random.Random(seed)
-
+    """Reproduce the exact current hardcoded world layout."""
     rooms = [
         RoomDef(1, (1, 1), 5, 4, (3, 4), (3, 5), 'North'),
-        RoomDef(2, (8, 1), 5, 4, (10, 4), (10, 5), 'North'),
+        RoomDef(2, (7, 1), 5, 4, (9, 4), (9, 5), 'North'),
     ]
 
-    _place_victims_in_rooms(rooms, num_victims, rng)
-    _place_obstacles_at_doors(rooms, rng, probability=0.5)
+    # Exact current victim placements
+    rooms[0].victims = [VictimDef('mildly injured boy', '/images/mildly injured boy.svg', (2, 2), 'area 1')]
+    rooms[1].victims = [
+        VictimDef('critically injured dog', '/images/critically injured dog.svg', (10, 3), 'area 2'),
+        VictimDef('critically injured girl', '/images/critically injured girl.svg', (10, 2), 'area 2'),
+    ]
 
-    ghost_victims = _collect_all_victims(rooms)
-    dz_height = max(len(ghost_victims), 1)
+    ghost_victims = [
+        ('critically injured girl', '/images/critically injured girl.svg'),
+        ('critically injured dog', '/images/critically injured dog.svg'),
+        ('mildly injured boy', '/images/mildly injured boy.svg'),
+    ]
+
+    rng = random.Random(seed)
+
+    _place_obstacles_at_doors(rooms, rng, probability=1)
+
+    # Exact current decorative object coordinates
+    decorative_overrides = {
+        'roof_tiles': [
+            (1,1),(2,1),(3,1),(4,1),(5,1),(1,2),(1,3),(1,4),(2,4),(4,4),(5,4),(5,3),(5,2),(7,1),(8,1),(9,1),
+            (10,1),(11,1),(7,2),(7,3),(7,4),(8,4),(11,2),(11,3),(11,4),(10,4),
+
+        ],
+        'street_tiles': [
+            (11,5),(13,5),(14,5),(13,6),(14,6),(12,5),(15,5),(15,6),(16,5),(16,6),(17,5),(17,6),(18,5),
+            (8,6),(7,6),(6,6),(5,6),(4,6),(3,6),(2,6),(1,6),(20,9),(21,9),(21,14),(20,14),(19,14),(9,6),
+            (1,5),(2,5),(3,5),(4,5),(5,5),(22,11),(22,12),(19,18),(18,18),(17,18),(16,18),(15,18),(13,17),
+            (11,17),(10,17),(8,18),(7,18),(6,18),(5,18),(4,18),(3,18),(2,18),(1,18),(12,17),(18,6),
+        ],
+        'street_tiles_alt': [
+            (21,10),(21,11),(21,12),(21,13),(19,15),(19,16),
+        ],
+        'plants': [
+            (12,3),(12,4),(18,1),(18,2),(18,3),(18,4),(6,19),(6,20),(6,21),(18,19),
+        ],
+        'decorative_objects': [
+            {'pos': (1, 12), 'name': 'plant', 'img': '/images/tree.svg', 'size': 3},
+            {'pos': (21, 7), 'name': 'heli', 'img': '/images/helicopter.svg', 'size': 3, 'traversable': False},
+            {'pos': (21, 16), 'name': 'ambulance', 'img': '/images/ambulance.svg', 'size': 2.3, 'traversable': False},
+        ],
+        'keyboard_sign': (12, 0),
+        'area_signs': [
+            ((3,1), '01', 0.5), ((9,1), '02', 0.55),
+        ],
+    }
 
     return WorldPreset(
         name='preset2',
-        grid_width=16,
-        grid_height=10,
+        grid_width=25,
+        grid_height=24,
         rooms=rooms,
-        drop_zone=DropZoneDef((14, 1), dz_height),
+        drop_zone=DropZoneDef((23, 8), 3),
         ghost_victims=ghost_victims,
-        seed=seed,
+        decorative_overrides=decorative_overrides,
+        seed=None,
     )
-
 
 # ── Preset: 2 big houses (6x6 + 10x4) ──────────────────────────────────────
 
