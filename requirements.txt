@@ -22,4 +22,4 @@ langgraph     >= 0.2.0   # LangGraph for graph-based agent workflows
 langchain-core >= 0.3.0  # Required by langgraph (Runnable interface)
 # Other libraries requested by students and added to make sure
 # Everyone uses the same versions.
-LiteLLM         >= 0.1.0   # A lightweight LLM interface for testing and development
+# LiteLLM         >= 0.1.0   # A lightweight LLM interface for testing and development

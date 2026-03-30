@@ -52,9 +52,9 @@ from agents1.action_mapper import ActionMapper
 from agents1.async_model_prompting import get_llm_result, submit_llm_call
 from agents1.modules.communication_module import CommunicationModule
 from agents1.modules.execution_module import execute_action
-from agents1.modules.perception_module import Perception
+from helpers.perception_module import Perception
 from agents1.modules.planning_module import Planning
-from agents1.modules.validator_module import ActionValidator
+from helpers.logic_module import ActionValidator
 from brains1.ArtificialBrain import ArtificialBrain
 from memory.base_memory import BaseMemory
 from memory.shared_memory import SharedMemory

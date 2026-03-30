@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 
-def _serialize_agent(
-    self, state: Dict[str, Any], agent_id: str
+def _serialize_agent(state: Dict[str, Any], agent_id: str
 ) -> Dict[str, Any]:
     """Extract self-position and carrying status."""
     agent_data = state.get(agent_id, {})
@@ -17,7 +16,6 @@ def _serialize_agent(
     }
 
 def _serialize_nearby(
-    self,
     state: Dict[str, Any],
     agent_id: str,
     teammate_ids: set,
@@ -78,7 +76,6 @@ def _serialize_nearby(
     return victims, obstacles, walls
 
 def _classify_type(
-    self,
     obj_id: str,
     obj_data: Dict[str, Any],
     teammate_ids: set,
@@ -120,4 +117,7 @@ def _classify_type(
         return 'blocked'
 
     return None
+
+
+
 

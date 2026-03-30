@@ -23,7 +23,8 @@ Usage:
 
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
-
+from helpers.logic_helpers import _find_object, _agent_location, _chebyshev_distance, is_object_adjacent, _get_carrying, _is_teammate_adjacent
+from helpers.object_types import _OBJECT_TYPES, _VICTIM_TYPES, _OBSTACLE_TYPES
 
 @dataclass
 class ValidationResult:
@@ -37,10 +38,6 @@ _OK = ValidationResult(valid=True)
 
 class ActionValidator:
     """Pre-dispatch validation for all LLM-chosen actions."""
-
-    _OBJECT_TYPES = frozenset({'victim', 'tree', 'rock', 'stone'})
-    _VICTIM_TYPES = frozenset({'victim'})
-    _OBSTACLE_TYPES = frozenset({'tree', 'rock', 'stone'})
 
     def __init__(
         self,
@@ -85,7 +82,7 @@ class ActionValidator:
 
     def _validate_directional_move(self, args, ws, teammates, *, direction: str):
         check_fn, dir_name, edge_name = self._MOVE_CHECKS[direction]
-        loc = self._agent_location(ws)
+        loc = _agent_location(ws)
         if loc and check_fn(loc, self.GRID_HEIGHT, self.GRID_WIDTH):
             return ValidationResult(False,
                 f'Cannot move {dir_name} — already at the {edge_name} edge of the grid.')
@@ -153,31 +150,28 @@ class ActionValidator:
         door = self._env_info.get_door(area)
         if door is None:
             return _OK
-        agent_loc = self._agent_location(ws)
+        agent_loc = _agent_location(ws)
         if agent_loc is None:
             return _OK
-        dx = abs(agent_loc[0] - door[0])
-        dy = abs(agent_loc[1] - door[1])
-        if max(dx, dy) > 1:
+
+        if _chebyshev_distance(agent_loc, door) > 1:
             return ValidationResult(False,
-                f"You must be at the door of area {area} to search it. "
-                f"Use MoveToArea({area}) to navigate to the door first.")
+                f"You must be at the door of area {area} to search it. ")
         return _OK
 
     # ── Carry ─────────────────────────────────────────────────────────────
 
     def _validate_carry_object(self, args, ws, teammates):
         # object_id + nearby check (victims only)
-        check = self._check_object_nearby(args, ws, self._VICTIM_TYPES)
+        check = is_object_adjacent(args, ws, _VICTIM_TYPES)
         if check is not None:
             return check
 
         # Already carrying?
-        carrying = self._get_carrying(ws)
+        carrying = _get_carrying(ws)
         if carrying:
             return ValidationResult(False,
-                f"You are already carrying {carrying[0]}. "
-                f"Drop it first before picking up another object.")
+                f"You are already carrying {carrying[0]}. ")
 
         # Capability: medical check (informed only)
         if self._informed and self._caps:
@@ -186,19 +180,18 @@ class ActionValidator:
             if 'critical' in obj_id and medical != 'high':
                 return ValidationResult(False,
                     "You cannot carry critically injured victims alone — "
-                    "your medical skill is too low. "
-                    "Use CarryObjectTogether with a partner instead.")
+                    "your medical skill is too low. ")
 
         return _OK
 
     def _validate_carry_object_together(self, args, ws, teammates):
         # object_id + nearby check (victims only)
-        check = self._check_object_nearby(args, ws, self._VICTIM_TYPES)
+        check = is_object_adjacent(args, ws, _VICTIM_TYPES)
         if check is not None:
             return check
 
         # Already carrying?
-        carrying = self._get_carrying(ws)
+        carrying = _get_carrying(ws)
         if carrying:
             return ValidationResult(False,
                 f"You are already carrying {carrying[0]}. "
@@ -206,7 +199,7 @@ class ActionValidator:
 
         # Teammate adjacent to object?
         obj_id = args.get('object_id', '')
-        if not self._is_teammate_adjacent(obj_id, ws, teammates):
+        if not _is_teammate_adjacent(obj_id, ws, teammates):
             return ValidationResult(False,
                 f"CarryObjectTogether failed: no teammate is adjacent to "
                 f"victim '{obj_id}'. Ask a teammate for help using "
@@ -218,7 +211,7 @@ class ActionValidator:
     # ── Drop ──────────────────────────────────────────────────────────────
 
     def _validate_drop(self, args, ws, teammates):
-        carrying = self._get_carrying(ws)
+        carrying = _get_carrying(ws)
         if not carrying:
             return ValidationResult(False,
                 'You are not carrying anything. There is nothing to drop.')
@@ -234,7 +227,7 @@ class ActionValidator:
         return _OK
 
     def _validate_drop_together(self, args, ws, teammates):
-        carrying = self._get_carrying(ws)
+        carrying = _get_carrying(ws)
         if not carrying:
             return ValidationResult(False,
                 'You are not carrying anything. There is nothing to drop.')
@@ -244,7 +237,7 @@ class ActionValidator:
 
     def _validate_remove_object(self, args, ws, teammates):
         # object_id + nearby check (obstacles only)
-        check = self._check_object_nearby(args, ws, self._OBSTACLE_TYPES)
+        check = is_object_adjacent(args, ws, _OBSTACLE_TYPES)
         if check is not None:
             return check
 
@@ -265,21 +258,21 @@ class ActionValidator:
 
     def _validate_remove_object_together(self, args, ws, teammates):
         # object_id + nearby check (rock/stone only, not tree)
-        check = self._check_object_nearby(
+        check = is_object_adjacent(
             args, ws, frozenset({'rock', 'stone'}))
         if check is not None:
             return check
 
         # Check the object is actually a rock or stone (not a tree)
         obj_id = args.get('object_id', '')
-        obj = self._find_object(obj_id, ws)
+        obj = _find_object(obj_id, ws)
         if obj and obj.get('type') == 'tree':
             return ValidationResult(False,
                 f"Trees cannot be removed cooperatively. "
                 f"Use RemoveObject to remove '{obj_id}' solo.")
 
         # Teammate adjacent to object?
-        if not self._is_teammate_adjacent(obj_id, ws, teammates):
+        if not _is_teammate_adjacent(obj_id, ws, teammates):
             return ValidationResult(False,
                 f"RemoveObjectTogether failed: no teammate is adjacent to "
                 f"obstacle '{obj_id}'. Ask a teammate for help using "
@@ -341,116 +334,3 @@ class ActionValidator:
         'Idle': _validate_idle,
         'SendMessage': _validate_send_message,
     }
-
-    # ── Shared helpers ────────────────────────────────────────────────────
-
-    @staticmethod
-    def _agent_location(ws: Dict) -> Optional[Tuple[int, int]]:
-        """Extract agent (x, y) from world_state."""
-        if not isinstance(ws, dict):
-            return None
-        loc = ws.get('agent', {}).get('location')
-        if loc is None:
-            return None
-        return (int(loc[0]), int(loc[1]))
-
-    @staticmethod
-    def _get_carrying(ws: Dict) -> List[str]:
-        """Extract list of carried object IDs from world_state."""
-        if not isinstance(ws, dict):
-            return []
-        return ws.get('agent', {}).get('carrying', [])
-
-    @staticmethod
-    def _get_nearby(ws: Dict) -> List[Dict]:
-        """Extract all nearby objects (victims + obstacles) from world_state."""
-        if not isinstance(ws, dict):
-            return []
-        return ws.get('victims', []) + ws.get('obstacles', [])
-
-    @staticmethod
-    def _find_object(obj_id: str, ws: Dict) -> Optional[Dict]:
-        """Find a specific object in current observations by ID."""
-        for o in ActionValidator._get_nearby(ws):
-            if o.get('id') == obj_id:
-                return o
-        return None
-
-    def _nearby_summary(self, ws: Dict, type_filter: Optional[set] = None) -> str:
-        """Human-readable summary of nearby actionable objects."""
-        types = type_filter or self._OBJECT_TYPES
-        parts = []
-        for o in self._get_nearby(ws):
-            if o.get('type') in types:
-                desc = f"{o['id']} ({o['type']}"
-                if o.get('severity'):
-                    desc += f", {o['severity']}"
-                desc += f" at {o['location']})"
-                parts.append(desc)
-        return ', '.join(parts) or 'none'
-
-    def _check_object_nearby(
-        self,
-        args: Dict,
-        ws: Dict,
-        allowed_types: set,
-    ) -> Optional[ValidationResult]:
-        """Validate object_id presence and proximity.
-
-        Returns a failing ``ValidationResult`` if invalid, or ``None`` if
-        the object checks pass (caller continues with action-specific checks).
-        """
-        obj_id = args.get('object_id', '')
-        summary = self._nearby_summary(ws, allowed_types)
-
-        if not obj_id:
-            return ValidationResult(False,
-                f'This action requires an object_id but none was provided. '
-                f'Nearby objects: [{summary}].')
-
-        nearby = self._get_nearby(ws)
-        nearby_ids = {o['id'] for o in nearby}
-        if obj_id not in nearby_ids:
-            return ValidationResult(False,
-                f"Object '{obj_id}' is not within reach. "
-                f'Move closer to the target or choose a different object. '
-                f'Nearby objects: [{summary}].')
-
-        # Check type match
-        obj = self._find_object(obj_id, ws)
-        if obj and obj.get('type') not in allowed_types:
-            obj_type = obj.get('type', 'unknown')
-            return ValidationResult(False,
-                f"Object '{obj_id}' is a {obj_type}, not a valid target for this action. "
-                f'Nearby valid objects: [{summary}].')
-
-        return None
-
-    @staticmethod
-    def _is_teammate_adjacent(
-        obj_id: str,
-        ws: Dict,
-        teammates: Set[Tuple[str, Tuple[int, int]]],
-    ) -> bool:
-        """Check if any teammate is within Chebyshev distance 1 of the object."""
-        nearby = ActionValidator._get_nearby(ws)
-        obj_loc = None
-        for o in nearby:
-            if o.get('id') == obj_id:
-                loc = o.get('location')
-                if loc is not None:
-                    obj_loc = (int(loc[0]), int(loc[1]))
-                break
-        if obj_loc is None:
-            return False
-
-        agent_loc = ActionValidator._agent_location(ws)
-        for tid, t_loc in teammates:
-            # Skip self
-            if agent_loc and tuple(t_loc) == tuple(agent_loc):
-                continue
-            dx = abs(int(t_loc[0]) - obj_loc[0])
-            dy = abs(int(t_loc[1]) - obj_loc[1])
-            if max(dx, dy) <= 1:
-                return True
-        return False

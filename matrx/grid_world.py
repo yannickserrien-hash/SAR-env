@@ -18,41 +18,7 @@ from matrx.messages.message_manager import MessageManager
 from matrx.objects.agent_body import _get_all_classes
 from matrx.api import api
 from engine.toon_utils import to_toon
-
-
-def _classify_object_type(obj_id: str, obj_data: dict):
-    """Classify a world object into a type string, or return None for uninteresting objects.
-
-    Mirrors PerceptionModule._classify_object but as a plain module-level function
-    so it can be used by GridWorld without importing from agents1/.
-    """
-    if not isinstance(obj_data, dict):
-        return None
-    img       = obj_data.get('img_name', '')
-    class_inh = obj_data.get('class_inheritance', [])
-    oid_lower = str(obj_id).lower()
-
-    if obj_data.get('is_collectable', False):
-        img_l = str(img).lower()
-        if 'critical' in img_l:
-            return 'crit'
-        elif 'mild' in img_l:
-            return 'mild'
-        else:
-            return 'healthy'
-    elif 'ObstacleObject' in class_inh:
-        if 'rock' in oid_lower:
-            return 'rock'
-        elif 'stone' in oid_lower:
-            return 'stone'
-        elif 'tree' in oid_lower:
-            return 'tree'
-        else:
-            return 'stone'
-    elif 'Door' in class_inh:
-        return 'door_open' if obj_data.get('is_open', True) else 'door_closed'
-    return None
-
+from helpers.perception_helpers import _classify_type
 
 class GridWorld:
     """  The Gridworld is the representation of the world and the core of MATRX
@@ -285,7 +251,6 @@ class GridWorld:
                 print("Scenario stopped through api")
                 break
 
-###### PLANNER RUN
     def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=2000, include_human=True):
         """
         Run GridWorld with MARBLE-style planning loop.
@@ -360,8 +325,7 @@ class GridWorld:
 
                 # Submit planning to background thread (returns Future immediately)
                 world_state = self.__get_complete_state()
-                map = self.process_map_to_dict(world_state)
-                planner.set_world_state(map)  # send current world state to planner for question answering
+                planner.set_world_state(world_state)  # send current world state to planner for question answering
                 
                 planning_future = planner.submit_generate_tasks(agents)
                 phase = PLANNING_IN_PROGRESS
@@ -400,28 +364,6 @@ class GridWorld:
                             agent.set_manual_task_decomposition(agent_plans[aid])
                             print(f"[GridWorld] Sent manual plan to {aid}:\n{agent_plans[aid]}")
 
-                    # Inject mid-iteration re-task callback so agents can request a new
-                    # task when they finish early, without waiting for the iteration to end.
-                    # The callback captures the current planner + agent list and serializes
-                    # the live world state at the moment the agent calls it.
-                    gw = self  # capture grid_world reference for state serialization
-                    for agent in agents:
-                        if hasattr(agent, '_request_task_callback'):
-                            def _make_callback(_agent=agent):
-                                def _callback():
-                                    _ws = gw.process_map_to_dict(
-                                        gw._GridWorld__get_complete_state()
-                                    )
-                                    return planner.request_new_task(_ws, agents)
-                                return _callback
-                            agent._request_task_callback = _make_callback()
-
-                    # Send human's suggested task as a MATRX message (only if human exists)
-                    if include_human:
-                        human_task = task_assignments.get('human_task', '')
-                        if human_task:
-                            self._send_planner_message_to_human(human_task, agents)
-
                     # Record initial task results
                     for agent in agents:
                         aid = getattr(agent, 'agent_id', 'rescuebot')
@@ -443,8 +385,7 @@ class GridWorld:
 
                 # Submit summarization to background thread
                 world_state = self.__get_complete_state()
-                map = self.process_map_to_dict(world_state)
-                summary_future = planner.submit_summarize(iteration_data, map)
+                summary_future = planner.submit_summarize(iteration_data, world_state)
                 phase = SUMMARIZING
 
             if phase == SUMMARIZING and summary_future is not None:
@@ -476,9 +417,6 @@ class GridWorld:
             is_done, tick_duration = self.__step()
             ticks_in_iteration += 1
 
-            # Process agent ↔ planner communication (non-blocking, every tick)
-            planner.process_agent_questions()
-
             if self.__run_matrx_api and api._matrx_done:
                 is_done = True
 
@@ -490,20 +428,7 @@ class GridWorld:
                 phase = NEEDS_SUMMARIZATION
 
         return planner.iteration_history
-
-#### HELPER
-    def _send_planner_message_to_human(self, task_msg, agents):
-        """Send the planner's suggested task to the human agent via MATRX messaging."""
-        from matrx.messages.message import Message
-
-        for agent in agents:
-            if hasattr(agent, 'send_message'):
-                msg = Message(
-                    content=f"Suggested task for you: {task_msg}",
-                    from_id='Planner'
-                )
-                agent.send_message(msg)
-                break
+    
 
     def get_env_object(self, requested_id, obj_type=None):
         """ Fetch an object or agent from the GridWorld using its ID, optionally checking for its object type.
@@ -1316,92 +1241,6 @@ class GridWorld:
 
     def __warn(self, warn_str):
         return f"[@{self.__current_nr_ticks}] {warn_str}"
-    
-    def process_map_to_dict(self, state) -> dict:
-        if state is None:
-            return None
-
-        memory = {
-            'victims': [],
-            'obstacles': [],
-            'doors': [],
-            'team_positions': {},
-        }
-
-        # Identify all agent IDs (AI + human) from GridWorld's own registry.
-        # registered_agents is a @property on GridWorld — no external attributes needed.
-        agent_ids   = set(self.registered_agents.keys())
-        human_names = {aid for aid, ab in self.registered_agents.items()
-                       if ab.is_human_agent}
-
-        # --- Agent / teammate positions ---
-        for obj_id in agent_ids:
-            obj_data = state.get(obj_id)
-            if isinstance(obj_data, dict):
-                loc = obj_data.get('location')
-                if loc is not None:
-                    memory['team_positions'][obj_id] = list(loc)
-
-        # --- Classify and store world objects ---
-        skip_ids = agent_ids | {'World'}
-        for obj_id, obj_data in state.items():
-            if obj_id in skip_ids:
-                continue
-            if not isinstance(obj_data, dict):
-                continue
-            loc = obj_data.get('location')
-            if loc is None:
-                continue
-
-            typ = _classify_object_type(obj_id, obj_data)
-            if typ is None:
-                continue
-
-            pos = list(loc)
-
-            # --- Victims ---
-            if typ in ('crit', 'mild', 'healthy'):
-                victim_type = {'crit': 'critical', 'mild': 'mild', 'healthy': 'healthy'}[typ]
-                area = obj_data.get('area', 'unknown')
-                existing = next(
-                    (v for v in memory['victims'] if v['id'] == obj_id), None
-                )
-                if existing is None:
-                    memory['victims'].append({
-                        'id': obj_id, 'type': victim_type, 'area': area,
-                    })
-                else:
-                    existing['area'] = area
-
-            # --- Obstacles ---
-            elif typ in ('rock', 'stone', 'tree'):
-                obstacle_type = {'rock': 'big_rock', 'stone': 'stone', 'tree': 'tree'}[typ]
-                existing = next(
-                    (o for o in memory['obstacles'] if o['id'] == obj_id), None
-                )
-                if existing is None:
-                    memory['obstacles'].append({
-                        'id': obj_id, 'type': obstacle_type, 'location': pos,
-                    })
-                else:
-                    existing['location'] = pos
-
-            # --- Doors (area entrances) ---
-            elif typ in ('door_open', 'door_closed'):
-                area_id = (str(obj_id).split('_-_door')[0]
-                           if '_-_door' in str(obj_id) else str(obj_id))
-                existing = next(
-                    (d for d in memory['doors'] if d['id'] == area_id), None
-                )
-                if existing is None:
-                    memory['doors'].append({'id': area_id, 'door': pos})
-                else:
-                    existing['door'] = pos
-
-        return memory
-
-   
-
 
     @property
     def registered_agents(self):
