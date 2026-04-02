@@ -138,18 +138,20 @@ def _flask_thread():
 
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-def run_matrx_visualizer(verbose, media_folder):
+def run_matrx_visualizer(verbose, media_folder, vis_port=None):
     """
     Creates a seperate Python thread in which the visualization server (Flask) is started, serving the JS visualization
     :return: MATRX visualization Python thread
     """
-    global debug, ext_media_folder
+    global debug, ext_media_folder, port
     debug = verbose
     ext_media_folder = media_folder
+    if vis_port is not None:
+        port = vis_port
 
     print("Starting visualization server")
     print("Initialized app:", app)
-    vis_thread = threading.Thread(target=_flask_thread)
+    vis_thread = threading.Thread(target=_flask_thread, daemon=True)
     vis_thread.start()
     return vis_thread
 

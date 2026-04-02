@@ -251,7 +251,7 @@ class GridWorld:
                 print("Scenario stopped through api")
                 break
 
-    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=2000, include_human=True):
+    def run_with_planner(self, api_info, planner, agents, ticks_per_iteration=2000, include_human=True, shutdown_event=None):
         """
         Run GridWorld with MARBLE-style planning loop.
 
@@ -306,7 +306,9 @@ class GridWorld:
         summary_future = None
         iteration_data = None
 
-        while not is_done and iteration < planner.max_iterations:
+        _shutdown = shutdown_event if shutdown_event is not None else __import__('threading').Event()
+
+        while not is_done and iteration < planner.max_iterations and not _shutdown.is_set():
 
             # Handle pause
             if self.__run_matrx_api and api.matrx_paused:
@@ -426,6 +428,9 @@ class GridWorld:
             # Check if iteration ticks exhausted
             if phase == EXECUTING and ticks_in_iteration >= ticks_per_iteration:
                 phase = NEEDS_SUMMARIZATION
+
+        if _shutdown.is_set():
+            print("[GridWorld] Graceful shutdown requested — exiting main loop")
 
         return planner.iteration_history
     

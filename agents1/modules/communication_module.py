@@ -170,7 +170,7 @@ class CommunicationModule:
         ]
 
         from agents1.async_model_prompting import submit_llm_call
-        llm_model = self._llm_model if self._llm_model.startswith('ollama/') else f'ollama/{self._llm_model}'
+        llm_model = self._llm_model
         self._summary_future = submit_llm_call(
             llm_model=llm_model,
             messages=messages,

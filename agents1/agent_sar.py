@@ -94,7 +94,7 @@ class SearchRescueAgent(LLMAgentBase):
             )
 
         self.reasoning = ReasoningIO('EMPTY')
-        self.critic = CriticBase('EMPTY')
+        self.critic_module = CriticBase('EMPTY')
 
         # Pipeline state
         self._pipeline_stage: PipelineStage = PipelineStage.IDLE
@@ -122,7 +122,8 @@ class SearchRescueAgent(LLMAgentBase):
     def update_knowledge(self, filtered_state: State) -> None:
         super().update_knowledge(filtered_state)
         agent_loc = filtered_state[self.agent_id]['location']
-        vision = self._capabilities.get('vision', 1) if self._capabilities else 1
+        vision_str = self._capabilities.get('vision', 'medium') if self._capabilities else 'medium'
+        vision = {'low': 1, 'medium': 2, 'high': 3}.get(vision_str, 2)
         self.area_tracker.update(agent_loc, vision_radius=vision)
 
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
@@ -167,7 +168,7 @@ class SearchRescueAgent(LLMAgentBase):
         if self._pipeline_stage == PipelineStage.PLANNING:
             return self.plan()
         if self._pipeline_stage == PipelineStage.REASONING:
-            return self._submit_reasoning()
+            return self.reason()
         if self._pipeline_stage == PipelineStage.EXECUTE:
             return self.execute()
         if self._pipeline_stage == PipelineStage.COMMUNICATION:
@@ -200,7 +201,7 @@ class SearchRescueAgent(LLMAgentBase):
             self._pipeline_stage = PipelineStage.PLANNING
             return self._advance_pipeline()
         
-        prompt = self.critic.get_critic_prompt({
+        prompt = self.critic_module.get_critic_prompt({
             'current_task': self._current_task,
             'last_action': self._last_action,
             'observation': self.WORLD_STATE,

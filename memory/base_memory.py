@@ -3,15 +3,21 @@ Base memory module for agents.
 """
 
 import json
+from collections import deque
 from typing import Any, List
 
 
 class BaseMemory:
     """Base class for agent memory modules."""
 
-    def __init__(self) -> None:
-        """Initialize the memory module."""
-        self.storage: List[Any] = []
+    def __init__(self, maxlen: int = 200) -> None:
+        """Initialize the memory module.
+
+        Args:
+            maxlen: Maximum number of entries to retain. Oldest entries
+                    are automatically discarded when the limit is reached.
+        """
+        self.storage: deque = deque(maxlen=maxlen)
 
     def update(self, key: str, information: Any) -> None:
         """
@@ -39,7 +45,7 @@ class BaseMemory:
         Returns:
             List[Any]: All stored information.
         """
-        return self.storage.copy()
+        return list(self.storage)
 
     def __str__(self) -> str:
         """

@@ -206,7 +206,9 @@ def _completion_requests(
     tool_choice: Optional[str],
     api_base: Optional[str],
 ) -> List[_Message]:
-    base = (api_base or "http://localhost:11434").rstrip("/")
+    if not api_base:
+        raise ValueError("api_base is required for the 'requests' backend (no default localhost fallback)")
+    base = api_base.rstrip("/")
     url = f"{base}/v1/chat/completions"
 
     payload: Dict[str, Any] = {
@@ -308,6 +310,14 @@ def init_marble_pool(num_agents: int = 1, backend: Optional[str] = None) -> None
     _executor = ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix='llm_pool'
     )
+
+
+def shutdown_marble_pool() -> None:
+    """Shut down the executor pool, allowing pending tasks to finish."""
+    global _executor
+    if _executor is not None:
+        _executor.shutdown(wait=True, cancel_futures=True)
+        _executor = None
 
 
 # ---------------------------------------------------------------------------

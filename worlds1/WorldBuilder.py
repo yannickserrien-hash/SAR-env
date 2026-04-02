@@ -64,7 +64,8 @@ def _compute_agent_starts(drop_zone_loc, grid_width):
 
 # Add the agents to the world
 def add_agents(builder, condition, name, folder, agent_type='baseline',
-               num_rescue_agents=1, include_human=True, ollama_base_port=11434,
+               num_rescue_agents=1, include_human=True,
+               api_base="http://localhost:11434", agent_model='qwen3:8b',
                planning_mode='simple', agent_presets=None,
                capability_knowledge='informed', comm_strategies=None,
                env_info=None, agent_starts=None):
@@ -79,7 +80,8 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
         agent_type: Type of AI agent to use ('baseline', 'llm', or 'langgraph')
         num_rescue_agents: Number of LLM-based RescueAgents (1-5)
         include_human: Whether to add a keyboard-controlled human agent
-        ollama_base_port: Base port for Ollama instances (agent N uses base_port + N)
+        api_base: Base URL for the LLM inference server (shared by all agents)
+        agent_model: Model name for rescue agents (e.g. 'qwen3:8b')
         planning_mode: Planning strategy for MARBLE agents ('simple' or 'dag')
         agent_presets: List of preset names or capability dicts, one per agent.
                        Defaults to all 'generalist'.
@@ -115,26 +117,26 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
             caps = resolve_capabilities(agent_presets[agent_nr])
 
             # Per-agent SenseCapability with vision from capabilities
+            vision_range = {'low': 1, 'medium': 2, 'high': 3}.get(caps['vision'], 2)
             sense_capability_agent = SenseCapability({
                 AgentBody: agent_sense_range,
-                CollectableBlock: caps['vision'],
+                CollectableBlock: vision_range,
                 None: other_sense_range,
-                ObstacleObject: caps['vision'],
+                ObstacleObject: vision_range,
             })
 
             if agent_type == 'marble':
-                agent_api_base = f"http://localhost:{ollama_base_port + agent_nr}"
                 brain = SearchRescueAgent(
                     slowdown=8,
                     condition=condition,
                     name=name,
                     folder=folder,
-                    llm_model='ollama/qwen3:8b',
+                    llm_model=agent_model,
                     strategy='react',
                     include_human=include_human,
                     shared_memory=marble_shared_memory,
                     planning_mode=planning_mode,
-                    api_base=agent_api_base,
+                    api_base=api_base,
                     capabilities=caps,
                     capability_knowledge=capability_knowledge,
                     comm_strategy=comm_strategies[agent_nr],
@@ -220,10 +222,11 @@ def _apply_auto_decorations(builder, preset):
 
 # Create the world
 def create_builder(condition, name, folder, agent_type='baseline',
-                   num_rescue_agents=1, include_human=True, ollama_base_port=11434,
+                   num_rescue_agents=1, include_human=True,
+                   api_base="http://localhost:11434", agent_model='qwen3:8b',
                    planning_mode='simple', agent_presets=None,
                    capability_knowledge='informed', comm_strategies=None,
-                   world_preset='static', world_seed=None):
+                   world_preset='static', world_seed=None, enable_gui=True):
     # Set numpy's random generator
     np.random.seed(random_seed)
 
@@ -247,14 +250,15 @@ def create_builder(condition, name, folder, agent_type='baseline',
     # Create the world builder
     builder = WorldBuilder(
         shape=[preset.grid_width, preset.grid_height],
-        tick_duration=tick_duration, run_matrx_api=True,
+        tick_duration=tick_duration, run_matrx_api=enable_gui,
         run_matrx_visualizer=False, verbose=verbose,
         simulation_goal=goal, visualization_bg_clr='#9a9083',
     )
 
     # Create folders where the logs are stored during the official condition
+    log_base = os.environ.get('SAR_LOG_DIR', os.path.join(os.getcwd(), 'logs'))
     current_exp_folder = datetime.now().strftime("exp_"+condition+"_at_time_%Hh-%Mm-%Ss_date_%dd-%mm-%Yy")
-    logger_save_folder = os.path.join("logs", current_exp_folder)
+    logger_save_folder = os.path.join(log_base, current_exp_folder)
     builder.add_logger(ActionLogger, log_strategy=1, save_path=logger_save_folder, file_name_prefix="actions_")
 
     # World bounds
@@ -327,7 +331,7 @@ def create_builder(condition, name, folder, agent_type='baseline',
 
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
-                        ollama_base_port=ollama_base_port,
+                        api_base=api_base, agent_model=agent_model,
                         planning_mode=planning_mode,
                         agent_presets=agent_presets,
                         capability_knowledge=capability_knowledge,

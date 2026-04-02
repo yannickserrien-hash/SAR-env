@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import concurrent.futures
+from collections import deque
 from typing import List, Dict, Any, Optional
 
 from helpers.toon_utils import to_toon
@@ -65,11 +66,11 @@ class EnginePlanner:
         """
         self.max_iterations = max_iterations
         self.score_file = score_file
-        self.llm_model = f"ollama/{llm_model}" if not llm_model.startswith("ollama/") else llm_model
+        self.llm_model = llm_model
         self._api_base = api_url
         self.ticks_per_iteration = ticks_per_iteration
         self.include_human = include_human
-        self.iteration_history: List[IterationData] = []
+        self.iteration_history: deque = deque(maxlen=max_iterations)
         self.logger = logging.getLogger('EnginePlanner')
         self._last_summary = ""
         self.world_state = {}  # latest world state received from channel
@@ -459,7 +460,7 @@ class EnginePlanner:
         # Pre-fetch NEXT iteration's tasks in background
         agents_for_prefetch = self._agents_cache if self._agents_cache else []
         self._prefetch_future = self._executor.submit(
-            self._generate_tasks_sync, world_state_summary, agents_for_prefetch
+            self._generate_tasks_sync, agents_for_prefetch
         )
 
         # Update _last_summary when the summary completes (callback runs on pool thread)
