@@ -2,8 +2,7 @@
 Communication Module — environment-sided message processing.
 
 Follows the Perception module pattern: processes raw MATRX received_messages
-into structured data for LLM prompts. Does NOT handle sending — outbound
-logic lives in LLMAgentBase._apply_communication().
+into structured data for LLM prompts.
 
 Supports pluggable strategies that control which messages appear in prompts.
 """
