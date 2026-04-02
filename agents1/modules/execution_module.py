@@ -8,11 +8,6 @@ SearchRescueAgent._dispatch_tool_call() and ActionMapper._dispatch().
 Cooperative actions are enriched with ``partner_name`` — an internal MATRX
 parameter that is never exposed to the LLM.  The partner can be a human
 agent or another AI agent.
-
-Usage:
-    from agents1.action_dispatch import dispatch_action
-
-    action_name, kwargs = dispatch_action('CarryObject', {'object_id': 'v1'}, 'rescuebot0')
 """
 
 import logging
@@ -40,7 +35,6 @@ _DEFAULT_TASK_COMPLETING = {
 def execute_action(
     name: str,
     args: Dict[str, Any],
-    partner_name: str = '',
     agent_id: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], str]:
     """Map an action *name* + LLM-supplied *args* to a MATRX (action, kwargs) pair.
@@ -48,18 +42,16 @@ def execute_action(
     Args:
         name:         Action name as returned by the LLM (tool_call or text-JSON).
         args:         Argument dict from the LLM (may be empty).
-        partner_name: Identifier of the cooperative partner agent (human or AI) —
-                      injected into cooperative actions automatically.
         agent_id:     Optional agent ID for logging context.
 
     Returns:
         ``(action_class_name, kwargs, task_completing)`` ready for MATRX.
     """
     log_prefix = f"[{agent_id}] " if agent_id else ""
-    print(f"{log_prefix}Dispatching action '{name}' with args {args} and partner '{partner_name}'")
 
     # Extract task_completing before dispatching (falls back to defaults)
     task_completing = args.pop('task_completing', '') or _DEFAULT_TASK_COMPLETING.get(name, '')
+    print(f"{log_prefix}Dispatching action '{name}' with args {args} and partner '{args.pop('partner_id', '')}'")
     
     # ── Movement ──────────────────────────────────────────────────────────
     if name in _MOVE_ACTIONS:
@@ -98,16 +90,26 @@ def execute_action(
     if name == 'Drop':
         return _Drop.__name__, {}, task_completing
 
-    # ── Cooperative carry / drop ──────────────────────────────────────────
+    # ── Joint actions ──────────────────────────────────────────
     if name == 'CarryObjectTogether':
         obj_id = args.get('object_id', '')
         if not obj_id:
             logger.warning("%sCarryObjectTogether called without object_id", log_prefix)
             return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
-        return _CarryObjectTogether.__name__, {'object_id': obj_id, 'partner_name': partner_name}, task_completing
-
-    if name == 'DropObjectTogether':
-        return _DropObjectTogether.__name__, {'partner_name': partner_name}, task_completing
+        resolved_partner = args.pop('partner_id', '')
+        return _CarryObjectTogether.__name__, {'object_id': obj_id, 'partner_name': resolved_partner}, task_completing
+    
+    if name == 'RemoveObjectTogether':
+        obj_id = args.get('object_id', '')
+        if not obj_id:
+            logger.warning("%sRemoveObjectTogether called without object_id", log_prefix)
+            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
+        resolved_partner = args.pop('partner_id', '')
+        return _RemoveObjectTogether.__name__, {
+            'object_id': obj_id,
+            'remove_range': 1,
+            'partner_name': resolved_partner,
+        }, task_completing
 
     # ── Remove obstacle (solo) ────────────────────────────────────────────
     if name == 'RemoveObject':
@@ -117,22 +119,10 @@ def execute_action(
             return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
         return _RemoveObject.__name__, {'object_id': obj_id, 'remove_range': 1}, task_completing
 
-    # ── Remove obstacle (cooperative) ─────────────────────────────────────
-    if name == 'RemoveObjectTogether':
-        obj_id = args.get('object_id', '')
-        if not obj_id:
-            logger.warning("%sRemoveObjectTogether called without object_id", log_prefix)
-            return _Idle.__name__, {'duration_in_ticks': 1}, task_completing
-        return _RemoveObjectTogether.__name__, {
-            'object_id': obj_id,
-            'remove_range': 1,
-            'partner_name': partner_name,
-        }, task_completing
-
     # ── Idle ──────────────────────────────────────────────────────────────
     if name == 'Idle':
         ticks = int(args.get('duration_in_ticks', 1))
         return _Idle.__name__, {'duration_in_ticks': ticks}, task_completing
-
+    
     logger.warning("%sUnknown action '%s', defaulting to Idle", log_prefix, name)
     return _Idle.__name__, {'duration_in_ticks': 1}, ''

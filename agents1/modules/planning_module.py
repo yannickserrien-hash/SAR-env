@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Any, Optional
-from agents1.modules.utils_prompting import to_toon
+from helpers.toon_utils import to_toon
 
 logger = logging.getLogger('Planning')
 
@@ -35,6 +35,12 @@ Priority order:
 4. Remove obstacles blocking unexplored areas.
 5. Explore unexplored areas to find victims.
 
+Joint action mechanics:
+- CarryObjectTogether / RemoveObjectTogether require a partner agent to be adjacent (within 1 block).
+- To coordinate: send an ask_help message, then wait (Idle) near the object until the partner arrives.
+- The partner must navigate to you and be adjacent before you can execute the joint action.
+- Once a cooperative carry succeeds, both agents are automatically moved to the drop zone.
+
 Respond with a SINGLE sentence describing the task. Include target IDs and [x, y] coordinates when known.
 Example: "Go to Area 1 and search it."; "Pick up victim with id victim_1 at location [2,5].", "Remove obstacle from the entrance of Area 2."
 "Send ask_help message to request cooperative carry for victim_3 at [8, 6]."
@@ -46,7 +52,85 @@ _STOP_WORDS = frozenset({
 })
 
 
-# ── Task status ──────────────────────────────────────────────────────────────
+class Planning:
+    def __init__(self, mode: str = 'simple') -> None:
+        self.mode = mode
+        self.task_decomposition: List[SubTask] = []
+        self.task_graph: Optional[TaskGraph] = None
+        self.current_task = ''
+
+    def set_current_task(self, task: str) -> None:
+        self.current_task = task
+
+    def set_task_decomposition(self, decomposition: str) -> None:
+        self.task_decomposition = decomposition
+
+    def set_manual_task_decomposition(self, decomposition: List[str]) -> None:
+        """Set plan from a list of task description strings."""
+        self.task_decomposition = [SubTask(desc) for desc in decomposition]
+        if self.task_decomposition:
+            self.task_decomposition[0].status = TaskStatus.ACTIVE
+        if self.mode == 'dag':
+            self.task_graph = TaskGraph.from_task_list(decomposition)
+                
+    def get_planning_prompt(self, information: Dict[str, Any]) -> List[Dict[str, str]]:
+        return [
+            {"role": "system", "content": PLANNER_PROMPT},
+            {"role": "user",   "content": to_toon(information)},
+        ]
+
+    def get_task_decomposition_prompt(
+        self, information: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        world_state = information.get('world_state', {})
+        memory = information.get('memory', '') or 'none'
+        feedback = information.get('feedback', '') or 'none'
+
+        info_dict: Dict[str, Any] = {
+            "task": self.current_task,
+            "world_state": world_state,
+            "memory": memory,
+            "feedback": feedback,
+        }
+
+        return [
+            {"role": "system", "content": TASK_DECOMPOSITION_PROMPT},
+            {"role": "user",   "content": to_toon(info_dict)},
+        ]
+    
+    def advance_task(self, task_completing: str = '') -> None:
+        """Advance the active task if task_completing matches it."""
+        if not task_completing:
+            return
+        if self.mode == 'dag':
+            self._advance_dag(task_completing)
+        else:
+            self._advance_simple(task_completing)
+
+    def _advance_simple(self, task_completing: str) -> None:
+        active = next(
+            (st for st in self.task_decomposition if st.status == TaskStatus.ACTIVE),
+            None,
+        )
+        if active is None:
+            return
+        if _is_task_match(task_completing, active.description):
+            active.status = TaskStatus.COMPLETED
+            for st in self.task_decomposition:
+                if st.status == TaskStatus.PENDING:
+                    st.status = TaskStatus.ACTIVE
+                    break
+            logger.info("Task completed: '%s' (matched '%s')", active.description, task_completing)
+
+    def _advance_dag(self, task_completing: str) -> None:
+        if not self.task_graph:
+            return
+        node = self.task_graph.get_current_task()
+        if node is None:
+            return
+        if _is_task_match(task_completing, node.description):
+            self.task_graph.advance()
+
 
 
 class TaskStatus(Enum):
@@ -55,10 +139,6 @@ class TaskStatus(Enum):
     COMPLETED = 'completed'
     SKIPPED = 'skipped'
 
-
-# ── SubTask (simple mode) ────────────────────────────────────────────────────
-
-
 @dataclass
 class SubTask:
     description: str
@@ -66,10 +146,6 @@ class SubTask:
 
     def __str__(self) -> str:
         return self.description
-
-
-# ── TaskGraph data structures (DAG mode) ─────────────────────────────────────
-
 
 @dataclass
 class TaskNode:
@@ -166,9 +242,6 @@ class TaskGraph:
         return "TaskGraph:\n" + "\n".join(parts) if parts else "TaskGraph: (empty)"
 
 
-# ── Keyword-overlap matching ─────────────────────────────────────────────────
-
-
 def _is_task_match(task_completing: str, task_description: str) -> bool:
     """Check if task_completing keywords overlap >=50% with task description."""
     tc_words = set(task_completing.lower().split()) - _STOP_WORDS
@@ -177,114 +250,3 @@ def _is_task_match(task_completing: str, task_description: str) -> bool:
         return False
     return len(tc_words & td_words) / len(tc_words) >= 0.5
 
-
-# ── Planning class ───────────────────────────────────────────────────────────
-
-
-class Planning:
-    def __init__(self, mode: str = 'simple') -> None:
-        self.mode = mode
-        self.task_decomposition: List[SubTask] = []
-        self.task_graph: Optional[TaskGraph] = None
-        self.current_task = ''
-
-        # Clarification state (AskPlanner discussion loop)
-        self._needs_clarification: bool = False
-        self._question: str = ''
-        self._feedback: str = ''
-        self._clarification_round: int = 0
-
-    def update_current_task(self, task: str) -> None:
-        self.current_task = task
-
-    def set_task_decomposition(self, decomposition: str) -> None:
-        self.task_decomposition = decomposition
-
-    def set_manual_task_decomposition(self, decomposition: List[str]) -> None:
-        """Set plan from a list of task description strings."""
-        self.task_decomposition = [SubTask(desc) for desc in decomposition]
-        if self.task_decomposition:
-            self.task_decomposition[0].status = TaskStatus.ACTIVE
-        if self.mode == 'dag':
-            self.task_graph = TaskGraph.from_task_list(decomposition)
-                
-    def get_planning_prompt(self, information: Dict[str, Any]) -> List[Dict[str, str]]:
-
-        return [
-            {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user",   "content": to_toon(information)},
-        ]
-
-    # ── Unified interface ────────────────────────────────────────────────
-
-    def has_remaining_tasks(self) -> bool:
-        if self.mode == 'dag':
-            return self.task_graph is not None and not self.task_graph.is_empty()
-        return any(
-            st.status in (TaskStatus.PENDING, TaskStatus.ACTIVE)
-            for st in self.task_decomposition
-        )
-
-    def get_tasks_for_reasoning(self) -> List[str]:
-        """Return ONLY the currently active task."""
-        if self.mode == 'dag':
-            node = self.task_graph.get_current_task() if self.task_graph else None
-            return [node.full_description()] if node else []
-        for st in self.task_decomposition:
-            if st.status == TaskStatus.ACTIVE:
-                return [st.description]
-        return []
-
-    def advance_task(self, task_completing: str = '') -> None:
-        """Advance the active task if task_completing matches it."""
-        if not task_completing:
-            return
-        if self.mode == 'dag':
-            self._advance_dag(task_completing)
-        else:
-            self._advance_simple(task_completing)
-
-    def _advance_simple(self, task_completing: str) -> None:
-        active = next(
-            (st for st in self.task_decomposition if st.status == TaskStatus.ACTIVE),
-            None,
-        )
-        if active is None:
-            return
-        if _is_task_match(task_completing, active.description):
-            active.status = TaskStatus.COMPLETED
-            for st in self.task_decomposition:
-                if st.status == TaskStatus.PENDING:
-                    st.status = TaskStatus.ACTIVE
-                    break
-            logger.info("Task completed: '%s' (matched '%s')", active.description, task_completing)
-
-    def _advance_dag(self, task_completing: str) -> None:
-        if not self.task_graph:
-            return
-        node = self.task_graph.get_current_task()
-        if node is None:
-            return
-        if _is_task_match(task_completing, node.description):
-            self.task_graph.advance()
-
-    # ── Prompt generation ────────────────────────────────────────────────
-
-    def get_task_decomposition_prompt(
-        self, information: Dict[str, Any]
-    ) -> List[Dict[str, str]]:
-        world_state = information.get('world_state', {})
-        memory = information.get('memory', '') or 'none'
-        feedback = information.get('feedback', '') or 'none'
-
-        info_dict: Dict[str, Any] = {
-            "task": self.current_task,
-            "world_state": world_state,
-            "memory": memory,
-            "feedback": feedback,
-        }
-
-        return [
-            {"role": "system", "content": TASK_DECOMPOSITION_PROMPT},
-            {"role": "user",   "content": to_toon(info_dict)},
-        ]

@@ -33,6 +33,9 @@ if __name__ == "__main__":
     # Available: 'always_respond', 'busy_aware'
     comm_strategies = ['always_respond', 'always_respond']
 
+    # LLM backend: 'ollama_sdk' (Ollama Python SDK) or 'requests' (direct HTTP)
+    llm_backend = 'ollama_sdk'
+
     # World preset: 'static' (current world), 'preset2' (2 houses), 'preset3' (2 big houses), 'random'
     world_preset = 'preset2'
     world_seed = None            # int for reproducibility, None for random each run
@@ -42,7 +45,7 @@ if __name__ == "__main__":
     manual_plans_file = None  # e.g. "manual_plans.yaml"
 
     # Scale LLM thread pool for the number of agents
-    init_marble_pool(num_rescue_agents)
+    init_marble_pool(num_rescue_agents, backend=llm_backend)
 
     builder, agents, total_victims = create_builder(
         condition=condition, name=name, agent_type=agent_type, folder=fld,

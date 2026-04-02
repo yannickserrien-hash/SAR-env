@@ -1,5 +1,5 @@
 from typing import Dict, List, Any
-from agents1.modules.utils_prompting import to_toon
+from helpers.toon_utils import to_toon
 
 
 CRITIC_PROMPT = """

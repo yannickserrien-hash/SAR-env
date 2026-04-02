@@ -199,9 +199,11 @@ class ActionValidator:
 
         # Teammate adjacent to object?
         obj_id = args.get('object_id', '')
-        if not _is_teammate_adjacent(obj_id, ws, teammates):
+        partner_id = args.get('partner_id', '') or None
+        if not _is_teammate_adjacent(obj_id, ws, teammates, partner_id=partner_id):
+            who = f"Partner '{partner_id}'" if partner_id else "No teammate"
             return ValidationResult(False,
-                f"CarryObjectTogether failed: no teammate is adjacent to "
+                f"CarryObjectTogether failed: {who} is not adjacent to "
                 f"victim '{obj_id}'. Ask a teammate for help using "
                 f"SendMessage(message_type='ask_help'), then wait for "
                 f"them to arrive before retrying.")
@@ -272,9 +274,11 @@ class ActionValidator:
                 f"Use RemoveObject to remove '{obj_id}' solo.")
 
         # Teammate adjacent to object?
-        if not _is_teammate_adjacent(obj_id, ws, teammates):
+        partner_id = args.get('partner_id', '') or None
+        if not _is_teammate_adjacent(obj_id, ws, teammates, partner_id=partner_id):
+            who = f"Partner '{partner_id}'" if partner_id else "No teammate"
             return ValidationResult(False,
-                f"RemoveObjectTogether failed: no teammate is adjacent to "
+                f"RemoveObjectTogether failed: {who} is not adjacent to "
                 f"obstacle '{obj_id}'. Ask a teammate for help using "
                 f"SendMessage(message_type='ask_help'), then wait for "
                 f"them to arrive before retrying.")
@@ -328,7 +332,6 @@ class ActionValidator:
         'CarryObject': _validate_carry_object,
         'CarryObjectTogether': _validate_carry_object_together,
         'Drop': _validate_drop,
-        'DropObjectTogether': _validate_drop_together,
         'RemoveObject': _validate_remove_object,
         'RemoveObjectTogether': _validate_remove_object_together,
         'Idle': _validate_idle,

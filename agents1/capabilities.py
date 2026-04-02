@@ -17,25 +17,25 @@ from typing import Any, Dict, List, Tuple
 
 CAPABILITY_PRESETS: Dict[str, Dict[str, Any]] = {
     'scout': {
-        'vision': 3,
+        'vision': 'high',
         'strength': 'low',
         'medical': 'low',
         'speed': 'fast',
     },
     'medic': {
-        'vision': 1,
+        'vision': 'low',
         'strength': 'low',
         'medical': 'high',
         'speed': 'normal',
     },
     'heavy_lifter': {
-        'vision': 1,
+        'vision': 'low',
         'strength': 'high',
         'medical': 'low',
         'speed': 'normal',
     },
     'generalist': {
-        'vision': 1,
+        'vision': 'medium',
         'strength': 'medium',
         'medical': 'low',
         'speed': 'normal',
@@ -52,13 +52,12 @@ SPEED_MOVE_DELAY: Dict[str, int] = {
 }
 
 # Valid values per dimension
-_VALID = {
-    'vision': {1, 2, 3},
+CAPABILITIES_MAP = {
+    'vision': {'low', 'medium', 'high'},
     'strength': {'low', 'medium', 'high'},
-    'medical': {'low', 'high'},
+    'medical': {'low', 'medium', 'high'},
     'speed': {'slow', 'normal', 'fast'},
 }
-
 
 def resolve_capabilities(preset_or_dict) -> Dict[str, Any]:
     """Resolve a preset name or custom dict into a validated capability dict."""
@@ -75,53 +74,61 @@ def resolve_capabilities(preset_or_dict) -> Dict[str, Any]:
     else:
         caps = dict(CAPABILITY_PRESETS[DEFAULT_PRESET])
 
-    for dim, valid_vals in _VALID.items():
+    for dim, valid_vals in CAPABILITIES_MAP.items():
         if caps.get(dim) not in valid_vals:
             raise ValueError(
                 f"Invalid capability '{dim}': {caps.get(dim)}. Valid: {valid_vals}"
             )
     return caps
 
-
 def get_capability_prompt(capabilities: Dict[str, Any]) -> str:
     """Return a human-readable description of agent capabilities for the LLM prompt."""
     lines = ["Your agent capabilities:"]
 
     # Vision
-    v = capabilities.get('vision', 2)
-    vis_desc = {1: 'low (1 block)', 2: 'medium (2 blocks)', 3: 'high (3 blocks)'}
-    lines.append(f"- Vision: {vis_desc.get(v, str(v))} — you can see objects within {v} block(s).")
+    v = capabilities.get('vision', 'medium')
+    vis_desc = {'low': 'low (1 block)', 'medium': 'medium (2 blocks)', 'high': 'high (3 blocks)'}
+    lines.append(f"- Vision: you can see objects within {vis_desc.get(v, str(v))}")
 
-    # Strength
-    s = capabilities.get('strength', 'medium')
-    if s == 'low':
+    medical = capabilities.get('medical', 'low')
+    strength = capabilities.get('strength', 'medium')
+
+    # Medical rules
+    if medical == 'high':
         lines.append(
-            "- Strength: low — you can only remove fallen trees solo. "
-            "Stones and rocks are too heavy for you alone, but you can always help remove them "
-            "cooperatively (RemoveObjectTogether)."
+            "- You can carry ALL victims alone (CarryObject)."
         )
-    elif s == 'medium':
-        lines.append(
-            "- Strength: medium — you can remove trees and small stones solo. "
-            "Big rocks require RemoveObjectTogether with a partner."
+    elif medical == 'medium':
+            lines.append(
+            "- You can carry mildly injured victims alone (CarryObject)."
+        )
+            lines.append(
+            "- Critically injured victims require CarryObjectTogether with an adjacent partner."
         )
     else:
         lines.append(
-            "- Strength: high — you can remove trees, small stones, and big rocks solo (RemoveObject)."
+            "- You can NOT carry any victims alone."
+        )
+        lines.append(
+            "- All victims require CarryObjectTogether with an adjacent partner."
         )
 
-    # Medical
-    m = capabilities.get('medical', 'low')
-    if m == 'low':
-        lines.append(
-            "- Medical: low — you can carry mildly injured victims solo (CarryObject). "
-            "Critically injured victims require cooperative carry (CarryObjectTogether) with a partner."
-        )
-    else:
-        lines.append(
-            "- Medical: high — you can carry ALL victims solo (CarryObject), "
-            "including critically injured ones."
-        )
+    # Strength rules
+    if strength == 'high':
+        lines.extend([
+            "- You can remove trees, small stones, and big rocks alone (RemoveObject).",
+        ])
+    elif strength == 'medium':
+        lines.extend([
+            "- Trees and small stones can be removed alone (RemoveObject).",
+            "- Big rocks require RemoveObjectTogether with an adjacent partner.",
+        ])
+    else:  # low
+        lines.extend([
+            "- You can only remove fallen trees alone (RemoveObject).",
+            "- Small stones and big rocks are too heavy for you alone, "
+            "but you can remove them with an adjacent partner (RemoveObjectTogether).",
+        ])
 
     # Speed
     sp = capabilities.get('speed', 'normal')
@@ -133,7 +140,6 @@ def get_capability_prompt(capabilities: Dict[str, Any]) -> str:
         lines.append("- Speed: normal — standard movement speed.")
 
     return '\n'.join(lines)
-
 
 def filter_tools_for_capabilities(
     tool_schemas: List[Dict],
@@ -159,58 +165,12 @@ def filter_tools_for_capabilities(
 
     return filtered_tools_by_name, filtered_schemas
 
-
-def get_game_rules(capabilities: Dict[str, Any] = None, drop_zone=(23, 8), num_victims: int = None) -> str:
-    """Return game rules string, optionally tailored to agent capabilities."""
+def get_game_rules(drop_zone=(23, 8)) -> str:
     dz = drop_zone
     base_rules = [
-        "Rules:",
-        f"- Deliver rescued victims to the drop zone at {dz}.",
+        "Goal:",
+        f"- Search for victims in the areas and rescue them by dropping them at the drop zone at {dz}.",
         "- You can only carry one victim at a time.",
     ]
-    if num_victims is not None:
-        base_rules.append(f"- There are {num_victims} victims total in the world.")
-
-    if capabilities is None:
-        # Generic rules (no capability info)
-        base_rules.extend([
-            "- Critically injured victims require CarryObjectTogether (both agents).",
-            "- Big rocks require RemoveObjectTogether (both agents).",
-            "- Trees can only be removed by the rescue robot (RemoveObject).",
-            "- Small stones can be removed solo (RemoveObject).",
-        ])
-    else:
-        medical = capabilities.get('medical', 'low')
-        strength = capabilities.get('strength', 'medium')
-
-        # Medical rules
-        if medical == 'high':
-            base_rules.append(
-                "- You can carry ALL victims solo (CarryObject), including critically injured."
-            )
-        else:
-            base_rules.append(
-                "- Mildly injured victims can be carried solo (CarryObject)."
-            )
-            base_rules.append(
-                "- Critically injured victims require CarryObjectTogether (both agents adjacent)."
-            )
-
-        # Strength rules
-        if strength == 'high':
-            base_rules.extend([
-                "- You can remove trees, small stones, and big rocks solo (RemoveObject).",
-            ])
-        elif strength == 'medium':
-            base_rules.extend([
-                "- Trees and small stones can be removed solo (RemoveObject).",
-                "- Big rocks require RemoveObjectTogether (both agents).",
-            ])
-        else:  # low
-            base_rules.extend([
-                "- You can only remove fallen trees solo (RemoveObject).",
-                "- Small stones and big rocks are too heavy for you solo, "
-                "but you can help remove them cooperatively (RemoveObjectTogether).",
-            ])
 
     return '\n'.join(base_rules)

@@ -137,29 +137,23 @@ def CarryObject(object_id: str, task_completing: str = "carrying victim"):
 
 
 @tool
-def CarryObjectTogether(object_id: str, task_completing: str = "carrying victim cooperatively"):
+def CarryObjectTogether(object_id: str, partner_id: str, task_completing: str = "carrying victim cooperatively"):
     """Cooperatively carry a critically injured victim or big rock with a partner agent.
     Both agents must be adjacent to the object.
 
     Args:
         object_id: The ID of the object to carry cooperatively.
+        partner_id: The ID of the adjacent teammate to cooperate with (from the 'teammates' list).
         task_completing: A brief description of the subtask this action will complete
                         (e.g. "approaching victim to carry" or "navigating to drop zone").
     """
-    return 'CarryObjectTogether', {'object_id': object_id}, {'task_completing': task_completing}
+    return 'CarryObjectTogether', {'object_id': object_id, 'partner_id': partner_id}, {'task_completing': task_completing}
 
 
 @tool
 def Drop():
     """Drop the currently carried object at the current grid position."""
     return 'Drop', {}, {'task_completing': "dropping carried victim"}
-
-
-@tool
-def DropObjectTogether():
-    """Drop an object that is being cooperatively carried with a partner agent."""
-    return 'DropObjectTogether', {}, {'task_completing': "dropping carried victim cooperatively"}
-
 
 @tool
 def RemoveObject(object_id: str, task_completing: str = "removing obstacle"):
@@ -175,16 +169,17 @@ def RemoveObject(object_id: str, task_completing: str = "removing obstacle"):
 
 
 @tool
-def RemoveObjectTogether(object_id: str, task_completing: str = "removing obstacle cooperatively"):
+def RemoveObjectTogether(object_id: str, partner_id: str, task_completing: str = "removing obstacle cooperatively"):
     """Cooperatively remove a big rock obstacle with a partner agent.
     Both agents must be adjacent to the rock.
 
     Args:
         object_id: The ID of the rock obstacle to remove cooperatively.
+        partner_id: The ID of the adjacent teammate to cooperate with (from the 'teammates' list).
         task_completing: A brief description of the subtask this action will complete
                         (e.g. "approaching victim to carry" or "navigating to drop zone").
     """
-    return 'RemoveObjectTogether', {'object_id': object_id}, {'task_completing': task_completing}
+    return 'RemoveObjectTogether', {'object_id': object_id, 'partner_id': partner_id}, {'task_completing': task_completing}
 
 
 @tool
@@ -228,7 +223,7 @@ ALL_ACTION_TOOLS = [
     MoveNorth, MoveSouth, MoveEast, MoveWest,
     MoveTo, NavigateToDropZone, MoveToArea, EnterArea, SearchArea,
     CarryObject, CarryObjectTogether,
-    Drop, DropObjectTogether,
+    Drop,
     RemoveObject, RemoveObjectTogether,
     Idle, SendMessage
 ]
@@ -241,7 +236,7 @@ def build_tool_schemas() -> Tuple[Dict[str, Any], List[Dict]]:
 
     Returns:
         tools_by_name:  ``{name: StructuredTool}`` lookup dict.
-        tool_schemas:   OpenAI-compatible tool schema list for LiteLLM.
+        tool_schemas:   OpenAI-compatible tool schema list for Ollama.
     """
     import logging
     from langchain_core.utils.function_calling import convert_to_openai_tool

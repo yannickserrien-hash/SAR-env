@@ -6,8 +6,8 @@ Subclasses only need to implement two methods:
     - filter_observations(state)         — what to perceive (optional: base
                                            class provides a sensible default)
 
-Everything else — navigation, carry retry, SharedMemory rendezvous, LLM
-polling, action validation, MATRX feasibility checks, and task injection —
+Everything else — navigation, carry autopilot (auto drop-zone after
+cooperative carry), LLM polling, action validation, and task injection —
 is handled automatically by this class.
 
 Typical subclass structure
@@ -41,14 +41,10 @@ from matrx.agents.agent_utils.state import State
 from matrx.agents.agent_utils.state_tracker import StateTracker
 from matrx.messages.message import Message
 
-from actions1.CustomActions import CarryObject as _CarryObject
 from actions1.CustomActions import CarryObjectTogether as _CarryObjectTogether
 from actions1.CustomActions import Idle as _Idle
-from actions1.CustomActions import RemoveObjectTogether as _RemoveObjectTogether
 from matrx.actions.object_actions import DropObject as _DropObject
-from matrx.actions.object_actions import RemoveObject as _RemoveObject
 
-from agents1.action_mapper import ActionMapper
 from agents1.async_model_prompting import get_llm_result, submit_llm_call
 from agents1.modules.communication_module import CommunicationModule
 from agents1.modules.execution_module import execute_action
@@ -66,14 +62,9 @@ logger = logging.getLogger('LLMAgentBase')
 
 MAX_NR_TOKENS: int = 3000
 TEMPERATURE: float = 0.3
-CARRY_WAIT_TIMEOUT_TICKS: int = 100
-NEGOTIATION_STALL_TICKS: int = 20  # ticks before lower-ID agent yields in dual help-request deadlock
 
 # SharedMemory key templates
-SM_HELP_REQUEST = 'help_request_{}'
 SM_CARRY_AUTOPILOT = 'carry_autopilot'
-SM_CARRY_RENDEZVOUS = 'carry_rendezvous'
-SM_CARRY_NOTIFICATION = 'carry_notification_{}'
 SM_TASK_ASSIGNMENTS = 'current_task_assignments'
 
 # ── Base class ─────────────────────────────────────────────────────────────────
@@ -92,12 +83,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         planning_mode:  Planning strategy: ``'simple'`` (flat list) or
                         ``'dag'`` (task graph with conditional branching).
     """
-
-    # ── Actions skipped for MATRX feasibility check ───────────────────────
-    _SKIP_MATRX_CHECK = frozenset({
-        'Idle', 'MoveTo', 'NavigateToDropZone', 'Drop',
-        'MoveNorth', 'MoveSouth', 'MoveEast', 'MoveWest', 'SendMessage',
-    })
 
     # ── Constructor ───────────────────────────────────────────────────────
 
@@ -165,17 +150,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # ── Task ───────────────────────────────────────────────────────────
         self._current_task: Optional[str] = None
 
-        # ── Action feedback ────────────────────────────────────────────────
-        self._action_feedback: str = ''
-
-        # ── Cooperative carry state ────────────────────────────────────────
-        self._pending_carry_kwargs: Optional[dict] = None
-        self._carry_wait_ticks: int = 0
+        # ── Cooperative carry autopilot ─────────────────────────────────────
         self._carry_autopilot: Optional[Dict] = None  # {'victim_id', 'destination', 'role'}
-        self._negotiation_ticks: int = 0  # ticks since conflicting help requests detected
-
-        # ── Text-JSON fallback parser ──────────────────────────────────────
-        self._mapper = ActionMapper(partner_name=name)
 
         # ── World state (populated each tick by _tick_setup) ───────────────
         self.WORLD_STATE: Dict = {}
@@ -191,7 +167,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             algorithm=Navigator.A_STAR_ALGORITHM,
         )
         self.init_global_state()
-        self.comm = CommunicationModule(
+        self.communication = CommunicationModule(
             agent_id=self.agent_id,
             strategy=self._comm_strategy,
             llm_model=self._llm_model,
@@ -251,8 +227,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._pending_future = None
         self._nav_target = None
         self._should_reason = True
-        self._pending_carry_kwargs = None
-        self._carry_wait_ticks = 0
         self.planner.update_current_task(task)
         print(f'[{self.agent_id}] Task: {task}')
 
@@ -282,37 +256,28 @@ class LLMAgentBase(ArtificialBrain, Perception):
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
         self.update_world_belief(filtered_state)
-        self.comm.process_messages(self.received_messages)
+        self.communication.process_messages(self.received_messages)
 
     def _run_infra(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
         """Handle infrastructure concerns only (no LLM polling).
 
         Checks (in order):
-            1. Carry autopilot (navigating to drop zone after successful carry)
-            2. Cooperative carry retry loop
+            1. Carry success detection → enters autopilot
+            2. Carry autopilot (navigating to drop zone after successful carry)
             3. Ongoing A* navigation
-            4. SharedMemory rendezvous / help request navigation
 
         Returns an ``(action_name, kwargs)`` tuple if infrastructure needs to
         act this tick, or ``None`` if the agent should proceed.
         """
-        self._check_carry_notifications()
+        self._check_carry_success()
 
         autopilot = self._handle_carry_autopilot()
         if autopilot is not None:
             return autopilot
 
-        carry = self._handle_carry_retry()
-        if carry is not None:
-            return carry
-
         nav = self._handle_navigation_tick()
         if nav is not None:
             return nav
-
-        rendezvous = self._handle_rendezvous()
-        if rendezvous is not None:
-            return rendezvous
 
         return None
 
@@ -339,71 +304,35 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
     # ── Infrastructure internals ──────────────────────────────────────────
 
-    def _handle_carry_retry(self) -> Optional[Tuple[str, Dict]]:
-        """Retry CarryObjectTogether until partner arrives or timeout."""
-        if self._pending_carry_kwargs is None:
-            return None
+    def _check_carry_success(self) -> None:
+        """Detect successful CarryObjectTogether and enter autopilot to drop zone.
 
-        obj_id = self._pending_carry_kwargs.get('object_id', '')
-        nearby_ids = (
-            {o['id'] for o in self.WORLD_STATE.get('victims', []) + self.WORLD_STATE.get('obstacles', [])}
-            if isinstance(self.WORLD_STATE, dict) else set()
-        )
-
-        if obj_id not in nearby_ids:
-            # Carry action succeeded — victim is in agent's inventory.
-            # Enter autopilot: navigate to drop zone, then drop.
-            print(f"[{self.agent_id}] Carry grabbed — entering autopilot to drop zone")
-            self._pending_carry_kwargs = None
-            self._carry_wait_ticks = 0
+        Uses ``previous_action_result.succeeded`` (set by MATRX engine on
+        ArtificialBrain) instead of polling nearby objects.
+        """
+        if self._carry_autopilot is not None:
+            return
+        if (self.previous_action == _CarryObjectTogether.__name__
+                and self.previous_action_result is not None
+                and self.previous_action_result.succeeded):
+            carrying = self.WORLD_STATE.get('agent', {}).get('carrying', [])
+            if not carrying:
+                return
+            obj_id = carrying[0]
             dest = self.env_info.drop_zone
+            print(f"[{self.agent_id}] Carry succeeded — entering autopilot to drop zone")
             self._carry_autopilot = {
                 'victim_id': obj_id,
                 'destination': dest,
                 'role': 'carrier',
             }
             if self.shared_memory:
-                self.shared_memory.update(SM_CARRY_RENDEZVOUS, None)
                 self.shared_memory.update(SM_CARRY_AUTOPILOT, {
                     'carrier': self.agent_id,
                     'victim_id': obj_id,
                     'destination': dest,
                 })
-                self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
-            self._should_reason = False  # stay in infrastructure mode
-            return self._navigate_to(dest)
-
-        self._carry_wait_ticks += 1
-        if self._carry_wait_ticks > CARRY_WAIT_TIMEOUT_TICKS:
-            print(f'[{self.agent_id}] Carry timeout after {CARRY_WAIT_TIMEOUT_TICKS} ticks')
-            
-            self.memory.update('action_failure', {
-                'victim_id': obj_id,
-                'action': "Carry",
-                'ticks_waited': CARRY_WAIT_TIMEOUT_TICKS,
-                'feedback': (
-                f"CarryObjectTogether for victim '{obj_id}' failed: "
-                f"partner did not arrive within {CARRY_WAIT_TIMEOUT_TICKS} ticks.")
-            })
-            
-            self._pending_carry_kwargs = None
-            self._carry_wait_ticks = 0
-            if self.shared_memory:
-                self.shared_memory.update(SM_CARRY_RENDEZVOUS, None)
-                self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
-            self._negotiation_ticks = 0
-            self._should_reason = True
-            return self._idle()
-
-        if self.shared_memory:
-            self.shared_memory.update(SM_CARRY_RENDEZVOUS, {
-                'agent': self.agent_id,
-                'victim_id': obj_id,
-                'location': self.agent_location,
-                'status': 'waiting_for_partner',
-            })
-        print(f'[{self.agent_id}] Carry retry {self._carry_wait_ticks}/{CARRY_WAIT_TIMEOUT_TICKS}')
-        return _CarryObjectTogether.__name__, dict(self._pending_carry_kwargs)
+            self._should_reason = False
 
     def _handle_carry_autopilot(self) -> Optional[Tuple[str, Dict]]:
         """Handle autopilot navigation to drop zone after a cooperative carry.
@@ -473,19 +402,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         }
         self._pending_future = None  # cancel any pending LLM call
         self._should_reason = False
-        if self.shared_memory:
-            self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
         return self._navigate_to(dest)
-
-    def _check_carry_notifications(self) -> None:
-        """Check if we were recruited into a carry and store in memory."""
-        if not self.shared_memory:
-            return
-        key = SM_CARRY_NOTIFICATION.format(self.agent_id)
-        notification = self.shared_memory.retrieve(key)
-        if notification:
-            self.memory.update('carry_participation', notification)
-            self.shared_memory.update(key, None)
 
     def _handle_navigation_tick(self) -> Optional[Tuple[str, Dict]]:
         """Continue A* navigation if a target is set."""
@@ -498,72 +415,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._nav_target = None
         if not self._carry_autopilot:
             self._should_reason = True
-        return None
-
-    def _handle_rendezvous(self) -> Optional[Tuple[str, Dict]]:
-        """Navigate to a partner's carry rendezvous or help request.
-
-        Checks carry_rendezvous first, then help_request_* keys.
-        Only auto-navigates to a help request if this agent does NOT have
-        its own pending help request (prevents deadlock).
-        """
-        if not self.shared_memory:
-            return None
-
-        # ── Carry rendezvous (partner is retrying CarryObjectTogether) ────
-        rendezvous = self.shared_memory.retrieve(SM_CARRY_RENDEZVOUS)
-        if (
-            rendezvous
-            and rendezvous.get('agent') != self.agent_id
-            and rendezvous.get('status') == 'waiting_for_partner'
-        ):
-            target = tuple(rendezvous['location'])
-            if not self._is_within_range(self.agent_location, target, radius=1):
-                self._pending_future = None
-                print(f'[{self.agent_id}] Navigating to carry rendezvous at {target}')
-                return self._navigate_to(target)
-
-        # ── Help request (partner asked for help via SendMessage) ─────────
-        # Only respond if we do NOT have our own pending help request
-        own_request = self.shared_memory.retrieve(SM_HELP_REQUEST.format(self.agent_id))
-        if own_request:
-            # Both agents need help — let LLM negotiate, don't auto-navigate.
-            # Safeguard: after NEGOTIATION_STALL_TICKS, lower ID agent yields.
-            self._negotiation_ticks += 1
-            if self._negotiation_ticks > NEGOTIATION_STALL_TICKS:
-                all_mem = self.shared_memory.retrieve_all()
-                other_requests = [
-                    (k, v) for k, v in all_mem.items()
-                    if isinstance(k, str) and k.startswith('help_request_')
-                    and v is not None and v.get('agent') != self.agent_id
-                ]
-                if other_requests and self.agent_id < other_requests[0][1]['agent']:
-                    print(f'[{self.agent_id}] Negotiation timeout — yielding to help other agent')
-                    self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), None)
-                    self._negotiation_ticks = 0
-                    # Fall through to the help request scan below
-                else:
-                    return None
-            else:
-                return None
-
-        # Scan for any other agent's help request
-        all_mem = self.shared_memory.retrieve_all()
-        for key, val in all_mem.items():
-            if (
-                isinstance(key, str)
-                and key.startswith('help_request_')
-                and val is not None
-                and val.get('agent') != self.agent_id
-                and val.get('status') == 'waiting'
-            ):
-                target = tuple(val['location'])
-                if self._is_within_range(self.agent_location, target, radius=1):
-                    return None  # already adjacent
-                self._pending_future = None
-                print(f'[{self.agent_id}] Navigating to help request from {val["agent"]} at {target}')
-                return self._navigate_to(target)
-
         return None
 
     def check_if_llm_response_ready(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
@@ -589,11 +440,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
         message = result[0]
         self._pending_future = None
 
-        # Resolve partner
-        partner = next(
-            (i[0] for i in self.teammates if i[0] != self.agent_id), None
-        )
-
         # ── Path A: structured tool_call ──────────────────────────────────
         tool_calls = getattr(message, 'tool_calls', None)
         if tool_calls:
@@ -610,20 +456,13 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
             if (check := self._validate_action(name, args)) is not None:
                 return check
-            action_name, kwargs, task_completed = execute_action(name, args, partner, self.agent_id)
+            action_name, kwargs, task_completed = execute_action(name, args, self.agent_id)
 
-        else: # ── Path B: plain-text JSON fallback ──────────────────────────────
+        else: # ── Path B: no tool call — retry ──────────────────────────────
             llm_text = getattr(message, 'content', '') or ''
-            print(f'[{self.agent_id}] Text response: {llm_text[:120]}')
-
-            raw_name, raw_args = self._mapper.parse_raw(llm_text)
-            if raw_name is None:
-                self._should_reason = True
-                return self._idle()
-
-            if (check := self._validate_action(raw_name, raw_args)) is not None:
-                return check
-            action_name, kwargs, task_completed = execute_action(raw_name, raw_args, partner, self.agent_id)
+            print(f'[{self.agent_id}] Text response (no tool call): {llm_text[:120]}')
+            self._should_reason = True
+            return self._idle()
 
         self.planner.advance_task(action_name)
         self.memory.update('action', {'action': action_name, 'args': kwargs})
@@ -691,17 +530,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
             move = self._navigator.get_move_action(self._state_tracker)
             return (move, {}) if move else self._idle()
 
-        if action_name == _CarryObjectTogether.__name__:
-            # Teammate adjacency already validated by ActionValidator
-            self._pending_carry_kwargs = dict(kwargs)
-            self._carry_wait_ticks = 0
-            self._should_reason = False
-            self._clear_partner_help_requests()
-            return action_name, kwargs
-
-        if action_name == _RemoveObjectTogether.__name__:
-            self._clear_partner_help_requests()
-
         return action_name, kwargs
 
     def _apply_communication(
@@ -715,48 +543,18 @@ class LLMAgentBase(ArtificialBrain, Perception):
         message_type = kwargs.get('message_type', 'message')
         text = kwargs.get('message', '')
 
-        # Build structured content and send via MATRX
         target = None if send_to == 'all' else send_to
         content = {'message_type': message_type, 'text': text}
-        msg = Message(content=content, from_id=self.agent_id, to_id=target)
-        self.send_message(msg)
+        self.send_message(Message(content=content, from_id=self.agent_id, to_id=target))
 
         # Auto-announce: if private 'help' reply to someone who asked, broadcast
         if message_type == 'help' and target is not None:
-            if self.comm.has_pending_ask_help(from_agent=send_to):
-                ann = {
-                    'message_type': 'message',
-                    'text': f'{self.agent_id} is responding to {send_to} help request',
-                }
+            if self.communication.has_pending_ask_help(from_agent=send_to):
+                ann = {'message_type': 'message', 'text': f'{self.agent_id} is responding to {send_to} help request'}
                 self.send_message(Message(content=ann, from_id=self.agent_id, to_id=None))
-
-        # Publish help request to SharedMemory so partner can auto-navigate
-        if message_type == 'ask_help' and self.shared_memory:
-            agent_loc = (
-                self.WORLD_STATE.get('agent', {}).get('location', [0, 0])
-                if isinstance(self.WORLD_STATE, dict) else [0, 0]
-            )
-            self.shared_memory.update(SM_HELP_REQUEST.format(self.agent_id), {
-                'agent': self.agent_id,
-                'location': agent_loc,
-                'message': text,
-                'status': 'waiting',
-            })
-            print(f'[{self.agent_id}] Published help request to SharedMemory')
 
         self._should_reason = True
         return self._idle()
-
-    def _clear_partner_help_requests(self) -> None:
-        """Clear partner help requests from SharedMemory after cooperative action dispatch."""
-        if not self.shared_memory:
-            return
-        all_mem = self.shared_memory.retrieve_all()
-        for key, val in all_mem.items():
-            if (isinstance(key, str) and key.startswith('help_request_')
-                    and val and val.get('agent') != self.agent_id):
-                self.shared_memory.update(key, None)
-                print(f'[{self.agent_id}] Cleared help request from {val.get("agent")}')
 
     # ── Action validation ─────────────────────────────────────────────────
 
@@ -795,16 +593,6 @@ class LLMAgentBase(ArtificialBrain, Perception):
             api_base=self._api_base,
         )
         self._should_reason = False
-
-    # ── Messaging ─────────────────────────────────────────────────────────
-
-    def _send_message(
-        self, content: str, sender: str, target_id: Optional[str] = None
-    ) -> None:
-        """Send a MATRX message to teammates (deduplicates before sending)."""
-        msg = Message(content=content, from_id=sender, to_id=target_id)
-        if content not in [m.content for m in self.messages_to_send]:
-            self.send_message(msg)
 
     # ── Utilities ─────────────────────────────────────────────────────────
 

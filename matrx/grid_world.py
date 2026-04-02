@@ -17,7 +17,7 @@ from matrx.objects.standard_objects import AreaTile
 from matrx.messages.message_manager import MessageManager
 from matrx.objects.agent_body import _get_all_classes
 from matrx.api import api
-from engine.toon_utils import to_toon
+from helpers.toon_utils import to_toon
 from helpers.perception_helpers import _classify_type
 
 class GridWorld:

@@ -17,7 +17,7 @@ import os
 import concurrent.futures
 from typing import List, Dict, Any, Optional
 
-from engine.toon_utils import to_toon
+from helpers.toon_utils import to_toon
 
 import yaml
 
@@ -353,7 +353,7 @@ class EnginePlanner:
         if not task_results_text:
             task_results_text = "No task results recorded this iteration."
 
-        from engine.toon_utils import to_toon
+        from helpers.toon_utils import to_toon
         system_prompt = PROMPTS['summarize_system'].strip()
         user_prompt = PROMPTS['summarize_user'].format(
             task_assignments_json=to_toon(iteration_data.task_assignments),

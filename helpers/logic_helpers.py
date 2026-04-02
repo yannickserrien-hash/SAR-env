@@ -29,8 +29,13 @@ def _is_teammate_adjacent(
         obj_id: str,
         ws: Dict,
         teammates: Set[Tuple[str, Tuple[int, int]]],
+        partner_id: Optional[str] = None,
     ) -> bool:
-        """Check if any teammate is within Chebyshev distance 1 of the object."""
+        """Check if a teammate is within Chebyshev distance 1 of the object.
+
+        When *partner_id* is given, only that specific teammate is checked.
+        Otherwise any non-self teammate qualifies.
+        """
         nearby = _get_adjacent(ws)
         obj_loc = None
         for o in nearby:
@@ -43,9 +48,10 @@ def _is_teammate_adjacent(
             return False
 
         agent_loc = _agent_location(ws)
-        for _, t_loc in teammates:
-            # Skip self
+        for t_id, t_loc in teammates:
             if agent_loc and tuple(t_loc) == tuple(agent_loc):
+                continue
+            if partner_id and t_id != partner_id:
                 continue
             if _chebyshev_distance(t_loc, obj_loc) <= 1:
                 return True

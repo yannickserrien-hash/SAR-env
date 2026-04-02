@@ -1,8 +1,9 @@
 """
 Unified LLM interface — single execution path for all LLM calls in the codebase.
 
-Calls litellm.completion() directly with per-agent Ollama port routing via
-the `api_base` parameter. No external framework dependencies (MARBLE, etc.).
+Supports two backends for local Ollama inference:
+  - "ollama_sdk": Uses the official Ollama Python SDK (ollama.Client.chat)
+  - "requests":   Direct HTTP calls to Ollama's OpenAI-compatible endpoint
 
 Uses a ThreadPoolExecutor so that LLM calls from multiple agents don't block
 each other. Each tick an agent submits a call and polls for the result.
@@ -15,7 +16,7 @@ Usage (async, for agents):
         max_token_num=512,
         tools=tool_schemas,
         tool_choice='auto',
-        api_base="http://localhost:11435",
+        api_base="http://localhost:11434",
     )
     result = get_llm_result(future)  # None if still running, List[Message] if done
 
@@ -28,20 +29,87 @@ Usage (sync, for EnginePlanner / memory):
         user_prompt="What should the agents do?",
         api_base="http://localhost:11434",
     )
+
+Backend selection:
+    from agents1.async_model_prompting import set_backend
+    set_backend("ollama_sdk")   # default
+    set_backend("requests")     # direct HTTP
+
+    # Or via environment variable:  LLM_BACKEND=requests
+    # Or at startup:  init_marble_pool(num_agents, backend="requests")
 """
 
+import json
 import logging
+import os
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Dict, List, Optional
 
-import litellm
+import requests as _requests
+
+try:
+    import ollama as _ollama_sdk
+except ImportError:
+    _ollama_sdk = None
 
 logger = logging.getLogger('async_model_prompting')
 
 # ---------------------------------------------------------------------------
-# Retry decorator (replaces MARBLE's error_handler — zero external deps)
+# Backend configuration
+# ---------------------------------------------------------------------------
+
+_backend: str = os.environ.get("LLM_BACKEND", "ollama_sdk")
+
+
+def set_backend(backend: str) -> None:
+    """Set the LLM backend. Options: 'ollama_sdk', 'requests'."""
+    global _backend
+    if backend not in ("ollama_sdk", "requests"):
+        raise ValueError(
+            f"Unknown backend: {backend!r}. Use 'ollama_sdk' or 'requests'."
+        )
+    _backend = backend
+    logger.info("LLM backend set to: %s", backend)
+
+
+# ---------------------------------------------------------------------------
+# Response dataclasses (compatible with OpenAI message attribute access)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Function:
+    name: str
+    arguments: str  # always a JSON string
+
+@dataclass
+class _ToolCall:
+    function: _Function
+    id: str = ""
+    type: str = "function"
+
+@dataclass
+class _Message:
+    content: Optional[str] = None
+    tool_calls: Optional[List[_ToolCall]] = None
+    role: str = "assistant"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _strip_model_prefix(model: str) -> str:
+    """Strip the 'ollama/' prefix from model names."""
+    if model.startswith("ollama/"):
+        return model[len("ollama/"):]
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Retry decorator
 # ---------------------------------------------------------------------------
 
 def _retry_with_backoff(retries: int = 5, base_wait_time: float = 1.0):
@@ -66,7 +134,120 @@ def _retry_with_backoff(retries: int = 5, base_wait_time: float = 1.0):
 
 
 # ---------------------------------------------------------------------------
-# Core LLM completion (with retry)
+# Backend: Ollama Python SDK
+# ---------------------------------------------------------------------------
+
+def _completion_ollama_sdk(
+    model: str,
+    messages: list,
+    max_token_num: int,
+    temperature: float,
+    tools: Optional[list],
+    tool_choice: Optional[str],
+    api_base: Optional[str],
+) -> List[_Message]:
+    if _ollama_sdk is None:
+        raise ImportError(
+            "ollama package required for 'ollama_sdk' backend. "
+            "Install with: pip install ollama>=0.4.0"
+        )
+    client = _ollama_sdk.Client(host=api_base) if api_base else _ollama_sdk.Client()
+
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "options": {"num_predict": max_token_num, "temperature": temperature},
+    }
+    if tools:
+        kwargs["tools"] = tools
+
+    response = client.chat(**kwargs)
+
+    # Convert Ollama SDK response to our _Message format
+    msg_data = response.get("message", response) if isinstance(response, dict) else getattr(response, 'message', response)
+    if isinstance(msg_data, dict):
+        content = msg_data.get("content") or None
+        raw_tool_calls = msg_data.get("tool_calls")
+    else:
+        content = getattr(msg_data, 'content', None) or None
+        raw_tool_calls = getattr(msg_data, 'tool_calls', None)
+
+    tool_calls = None
+    if raw_tool_calls:
+        tool_calls = []
+        for i, tc in enumerate(raw_tool_calls):
+            if isinstance(tc, dict):
+                fn = tc.get("function", {})
+                fn_name = fn.get("name", "")
+                fn_args = fn.get("arguments", {})
+            else:
+                fn = getattr(tc, 'function', tc)
+                fn_name = getattr(fn, 'name', '') if not isinstance(fn, dict) else fn.get('name', '')
+                fn_args = getattr(fn, 'arguments', {}) if not isinstance(fn, dict) else fn.get('arguments', {})
+            args_str = json.dumps(fn_args) if isinstance(fn_args, dict) else str(fn_args)
+            tool_calls.append(_ToolCall(
+                function=_Function(name=fn_name, arguments=args_str),
+                id=f"call_{i}",
+            ))
+
+    return [_Message(content=content, tool_calls=tool_calls or None)]
+
+
+# ---------------------------------------------------------------------------
+# Backend: Direct HTTP (requests) via Ollama's OpenAI-compatible endpoint
+# ---------------------------------------------------------------------------
+
+def _completion_requests(
+    model: str,
+    messages: list,
+    max_token_num: int,
+    temperature: float,
+    tools: Optional[list],
+    tool_choice: Optional[str],
+    api_base: Optional[str],
+) -> List[_Message]:
+    base = (api_base or "http://localhost:11434").rstrip("/")
+    url = f"{base}/v1/chat/completions"
+
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_token_num,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+    if tool_choice and tools:
+        payload["tool_choice"] = tool_choice
+
+    resp = _requests.post(url, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Parse OpenAI-format response
+    choice = data["choices"][0]["message"]
+    content = choice.get("content") or None
+    raw_tool_calls = choice.get("tool_calls")
+
+    tool_calls = None
+    if raw_tool_calls:
+        tool_calls = []
+        for tc in raw_tool_calls:
+            fn = tc.get("function", {})
+            tool_calls.append(_ToolCall(
+                function=_Function(
+                    name=fn.get("name", ""),
+                    arguments=fn.get("arguments", "{}"),
+                ),
+                id=tc.get("id", ""),
+            ))
+
+    return [_Message(content=content, tool_calls=tool_calls or None)]
+
+
+# ---------------------------------------------------------------------------
+# Core LLM completion dispatcher (with retry)
 # ---------------------------------------------------------------------------
 
 @_retry_with_backoff(retries=5, base_wait_time=1)
@@ -79,18 +260,19 @@ def _llm_completion(
     tool_choice: Optional[str] = None,
     api_base: Optional[str] = None,
 ) -> list:
-    """Call litellm.completion with retry logic. Returns List[Message]."""
-    completion = litellm.completion(
-        model=llm_model,
-        messages=messages,
-        max_tokens=max_token_num,
-        temperature=temperature,
-        tools=tools,
-        tool_choice=tool_choice,
-        base_url=api_base,
-    )
-    msg = completion.choices[0].message
-    return [msg]
+    """Call the configured LLM backend with retry logic. Returns List[_Message]."""
+    model = _strip_model_prefix(llm_model)
+
+    if _backend == "ollama_sdk":
+        return _completion_ollama_sdk(
+            model, messages, max_token_num, temperature, tools, tool_choice, api_base
+        )
+    elif _backend == "requests":
+        return _completion_requests(
+            model, messages, max_token_num, temperature, tools, tool_choice, api_base
+        )
+    else:
+        raise ValueError(f"Unknown LLM backend: {_backend!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -109,13 +291,19 @@ def _get_executor() -> ThreadPoolExecutor:
     return _executor
 
 
-def init_marble_pool(num_agents: int = 1) -> None:
+def init_marble_pool(num_agents: int = 1, backend: Optional[str] = None) -> None:
     """Resize the executor pool based on the number of agents.
 
     Call once at startup (optional). Workers = max(8, num_agents * 3).
     Replaces any existing pool.
+
+    Args:
+        num_agents: Number of concurrent agents.
+        backend:    Optionally set the LLM backend ('ollama_sdk' or 'requests').
     """
     global _executor
+    if backend is not None:
+        set_backend(backend)
     workers = max(8, num_agents * 3)
     _executor = ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix='llm_pool'
@@ -138,16 +326,16 @@ def submit_llm_call(
 ) -> Future:
     """Submit an LLM call non-blocking; returns a Future immediately.
 
-    The Future's result will be ``List[Message]`` on success.
+    The Future's result will be ``List[_Message]`` on success.
 
     Args:
-        llm_model:     LiteLLM model string, e.g. ``"ollama/llama3"``.
+        llm_model:     Model string, e.g. ``"ollama/llama3"`` or ``"qwen3:8b"``.
         messages:      OpenAI-style message list (role/content dicts).
         max_token_num: Max tokens for the completion.
         temperature:   Sampling temperature.
         tools:         OpenAI-compatible tool schemas (optional).
         tool_choice:   ``'auto'``, ``'none'``, or a specific tool name.
-        api_base:      Per-agent Ollama base URL, e.g. ``"http://localhost:11435"``.
+        api_base:      Ollama base URL, e.g. ``"http://localhost:11434"``.
         **kwargs:      Reserved for future use.
     """
     return _get_executor().submit(
@@ -166,7 +354,7 @@ def get_llm_result(future: Future):
     """Poll a Future without blocking.
 
     Returns:
-        ``List[Message]`` if the call is done, ``None`` if still in flight.
+        ``List[_Message]`` if the call is done, ``None`` if still in flight.
 
     Raises:
         Exception: Propagates any exception the LLM call raised.

@@ -11,7 +11,7 @@ from actions1.CustomActions import RemoveObjectTogether, DropObject, Idle, Carry
 from matrx.actions.object_actions import RemoveObject
 from matrx.objects import EnvObject
 from matrx.goals import WorldGoal
-from agents1.search_rescue_agent import SearchRescueAgent
+from agents1.agent_sar import SearchRescueAgent
 from agents1.capabilities import resolve_capabilities, DEFAULT_PRESET
 from memory.shared_memory import SharedMemory
 from worlds1.environment_info import EnvironmentInformation

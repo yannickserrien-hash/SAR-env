@@ -12,10 +12,10 @@ import json
 import logging
 from concurrent.futures import Future
 from typing import Any, Dict, List, Optional
+from helpers.communication_helpers import _extract_message
+from matrx.messages.message import Message
 
 logger = logging.getLogger('CommunicationModule')
-
-VALID_MESSAGE_TYPES = frozenset({'ask_help', 'help', 'message'})
 
 _COMMUNICATION_PROMPT = """You are a communication processor for a Search and Rescue agent team.
 Extract actionable information from the following inter-agent messages.
@@ -77,11 +77,10 @@ def _resolve_strategy(name: str) -> CommStrategy:
 # ── Communication Module ─────────────────────────────────────────────────────
 
 class CommunicationModule:
-    """Environment-sided message processing (like Perception for observations).
+    """Environment-sided message processing.
 
     Processes raw MATRX received_messages into structured data.
     Handles async summarization of old message history.
-    Does NOT handle sending — that's in LLMAgentBase._apply_communication().
     """
 
     def __init__(
@@ -104,8 +103,6 @@ class CommunicationModule:
         self._summary_future: Optional[Future] = None
         self._summary_text: str = ''
 
-    # ── Inbound processing ────────────────────────────────────────────────
-
     def process_messages(self, received_messages: list) -> None:
         """Ingest new MATRX messages since last call.
 
@@ -119,46 +116,12 @@ class CommunicationModule:
             return
 
         for msg in received_messages[self._processed_count:]:
-            entry = self._extract_message(msg)
+            entry = _extract_message(msg, self.agent_id)
             if entry is not None:
                 self._messages.append(entry)
 
         self._processed_count = new_count
         self._maybe_summarize()
-
-    def _extract_message(self, msg) -> Optional[dict]:
-        """Extract structured data from a MATRX Message object."""
-        from_id = getattr(msg, 'from_id', None)
-        to_id = getattr(msg, 'to_id', None)
-        content = getattr(msg, 'content', None)
-
-        # Skip messages from self
-        if from_id == self.agent_id:
-            return None
-
-        # Handle structured content (dict with message_type + text)
-        if isinstance(content, dict):
-            text = content.get('text', '')
-            msg_type = content.get('message_type', 'message')
-            if msg_type not in VALID_MESSAGE_TYPES:
-                msg_type = 'message'
-        elif isinstance(content, str):
-            text = content
-            msg_type = 'message'
-        else:
-            return None
-
-        if not text:
-            return None
-
-        return {
-            'from': from_id or 'unknown',
-            'to': 'all' if to_id is None else (to_id if isinstance(to_id, str) else str(to_id)),
-            'message_type': msg_type,
-            'text': text,
-        }
-
-    # ── Async summarization ───────────────────────────────────────────────
 
     def _poll_summary(self) -> None:
         """Non-blocking poll of pending summary future."""
@@ -204,7 +167,7 @@ class CommunicationModule:
 
         messages = [
             {"role": "system", "content": "Summarize the following agent communication history concisely. Focus on key information: help requests, discoveries, task updates, and commitments made."},
-            {"role": "user", "content": f"{existing}New messages to incorporate:\n{old_text}"},
+            {"role": "user", "content": f"{existing}. New messages to incorporate:\n{old_text}"},
         ]
 
         from agents1.async_model_prompting import submit_llm_call
@@ -217,14 +180,8 @@ class CommunicationModule:
             api_base=self._api_base,
         )
 
-    # ── Prompt generation ─────────────────────────────────────────────────
-
-    def get_messages_for_prompt(self, limit: int = 10, agent_busy: bool = False) -> List[dict]:
-        """Return messages formatted for the reasoning prompt.
-
-        1. Strategy filters (BusyAware may hide non-urgent messages)
-        2. Take most recent `limit` messages
-        3. If summary exists, prepend as context
+    def get_messages(self, limit: int = 10, agent_busy: bool = False) -> List[dict]:
+        """Return messages. Applies strategy-based filtering and includes summary if available.
         """
         filtered = self._strategy.filter_for_prompt(self._messages, agent_busy)
         recent = filtered[-limit:] if len(filtered) > limit else filtered
@@ -239,33 +196,6 @@ class CommunicationModule:
             })
         result.extend(recent)
         return result
-
-    # ── Communication stage prompt ───────────────────────────────────────
-
-    def get_communication_prompt(self, messages: list, agent_context: dict = None) -> list:
-        """Build a prompt to extract actionable information from incoming messages.
-
-        Returns an OpenAI-style message list for the COMMUNICATION pipeline stage.
-        Optionally includes agent context (position, task, carrying) for relevance assessment.
-        """
-        formatted = '\n'.join(
-            f"[{m['from']} -> {m['to']}] ({m['message_type']}) {m['text']}"
-            for m in messages
-        )
-        if agent_context:
-            context_str = (
-                f"Your current state:\n"
-                f"- Position: {agent_context.get('position')}\n"
-                f"- Current task: {agent_context.get('current_task')}\n"
-                f"- Carrying: {agent_context.get('carrying')}\n"
-            )
-            formatted = context_str + "\nMessages:\n" + formatted
-        return [
-            {"role": "system", "content": _COMMUNICATION_PROMPT},
-            {"role": "user", "content": formatted},
-        ]
-
-    # ── Query helpers ─────────────────────────────────────────────────────
 
     def has_pending_ask_help(self, from_agent: str) -> bool:
         """Check if there's a recent ask_help from `from_agent`.
