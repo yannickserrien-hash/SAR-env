@@ -28,7 +28,7 @@ OLLAMA_HOST=0.0.0.0:11435 ollama serve
 OLLAMA_HOST=0.0.0.0:11436 ollama serve
 ```
 
-**Port formula**: Agent N uses `ollama_base_port + N + 1`. Configure `ollama_base_port` in `main.py`. Default models: `qwen3:8b` (EnginePlanner), `qwen2.5:3b` (RescueAgents). Pull models via `ollama pull <model>`.
+**Port formula**: Agent N uses `ollama_base_port + N + 1`. Configure `ollama_base_port` in `main.py`. Default models: `qwen3:8b` (EnginePlanner), `ollama/llama3` (RescueAgents). Pull models via `ollama pull <model>`.
 
 ## Running the Simulation
 
@@ -47,6 +47,8 @@ Opens visualization at http://localhost:3000 (use "God" view or human agent keyb
 - **include_human** (bool): Add keyboard-controlled agent
 - **planning_mode**: `'simple'` (flat task list) or `'dag'` (graph with conditionals)
 - **manual_plans_file**: Set to `"manual_plans.yaml"` to override LLM task generation, `None` for LLM mode
+- **planner_model**: Model for EnginePlanner (default: `'qwen3:8b'`)
+- **agent_model**: Model for RescueAgents (default: `'ollama/llama3'`)
 
 ### Manual Plans Override
 
@@ -63,6 +65,15 @@ iterations:
 ```
 
 Plans are optional per agent — omit `plan` to let the PlanningModule use LLM. Fallback `agent_plans` section applies when iteration entries lack plans. See `manual_plans.yaml` for full syntax.
+
+## LLM Backend Configuration
+
+The system supports two LLM execution backends via `LLM_BACKEND` environment variable in `main.py`:
+
+- **ollama_sdk** (default): Uses Ollama Python SDK via `agents1/async_model_prompting.py`. More stable, better error handling, recommended for production.
+- **requests**: Direct HTTP calls to Ollama's OpenAI-compatible endpoint. Lighter weight, useful for debugging or environments where SDK installation is problematic.
+
+All LLM calls route through `async_model_prompting.py` with `@retry_on_llm_failure` decorator (5 attempts, exponential backoff). ThreadPoolExecutor pool size: `max(4, num_agents * 3)` workers.
 
 ## Score Tracking & Output
 
@@ -82,11 +93,11 @@ Runs post-simulation via `output_logger(fld)` in `main.py`. Parses action logs f
 **Fix**: Ensure `ollama serve` is running on the correct ports. Verify with `curl http://localhost:11434/api/tags`. Check `ollama_base_port` in `main.py` matches terminal configuration.
 
 ### Timeout Errors
-**Symptom**: "Ollama request timed out" (60s default in `engine/llm_utils.py`)
-**Fix**: Large models (27B+) may exceed timeout on slow hardware. Reduce model size (e.g., `qwen3:8b` instead of `gemma3:27b`) or increase `timeout=60` in `query_llm()`.
+**Symptom**: "Ollama request timed out" (120s default in `agents1/async_model_prompting.py`)
+**Fix**: Large models (27B+) may exceed timeout on slow hardware. Reduce model size (e.g., `qwen3:8b` instead of larger models) or increase `timeout=120` in `query_ollama_with_ollama_sdk()`.
 
 ### LLM Thread Pool
-Initialized via `init_llm_pool(num_rescue_agents)` in `main.py`. Workers = max(4, num_agents * 3) to handle concurrent reasoning/memory/communication calls per agent. Adjust in `engine/llm_utils.py` if agents block on LLM responses.
+Initialized via `init_marble_pool(num_rescue_agents)` in `main.py` from `agents1/async_model_prompting.py`. Workers = max(4, num_agents * 3) to handle concurrent reasoning/memory/communication calls per agent. ThreadPoolExecutor allows non-blocking async LLM execution during MATRX tick loop.
 
 ### Verbose Debugging
 Enable Python logging before main execution:
@@ -94,16 +105,16 @@ Enable Python logging before main execution:
 import logging
 logging.basicConfig(level=logging.INFO)
 ```
-Key loggers: `'EnginePlanner'`, `'llm_utils'`, `'RescueAgent'`. LLM query entry points print "LLM queried" by default (see `query_llm_async` in `engine/llm_utils.py`).
+Key loggers: `'EnginePlanner'`, `'async_model_prompting'`, `'SearchRescueAgent'`. LLM query entry points print "LLM queried" by default. See `testing-debugging.md` for comprehensive debugging strategies.
 
 ## Key Files Reference
 
-- **main.py**: Entry point, configuration hub, score/history initialization
+- **main.py**: Entry point, configuration hub, score/history initialization, MARBLE pool setup
 - **HOW_TO_RUN.md**: Setup instructions, dependency list, config table
 - **requirements.txt**: Python dependencies
 - **manual_plans.yaml**: Optional LLM override for task/plan generation
 - **engine/engine_planner.py**: EnginePlanner (task coordination, termination logic)
-- **engine/llm_utils.py**: Ollama query functions, timeout/connection handling, thread pool
-- **engine/iteration_data.py**: IterationData dataclass (task_assignments, summary, score)
+- **agents1/async_model_prompting.py**: Unified LLM executor, retry decorator, ThreadPoolExecutor
+- **engine/parsing_utils.py**: JSON parsing utilities, few-shot example loader
 - **loggers/OutputLogger.py**: Post-run CSV output generation
 - **worlds1/WorldBuilder.py**: Agent instantiation with per-agent Ollama ports

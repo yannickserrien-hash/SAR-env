@@ -68,6 +68,7 @@ class SearchRescueAgent(LLMAgentBase):
         capability_knowledge: str = 'informed',
         comm_strategy: str = 'always_respond',
         env_info: Optional[EnvironmentInformation] = None,
+        use_planner: bool = True,
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -83,6 +84,7 @@ class SearchRescueAgent(LLMAgentBase):
             capability_knowledge=capability_knowledge,
             comm_strategy=comm_strategy,
             env_info=env_info,
+            use_planner=use_planner,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
         self.area_tracker = AreaExplorationTracker(self.env_info.get_area_cells())
@@ -94,7 +96,7 @@ class SearchRescueAgent(LLMAgentBase):
             )
 
         self.reasoning = ReasoningIO('EMPTY')
-        self.critic = CriticBase('EMPTY')
+        self.critic_module = CriticBase('EMPTY')
 
         # Pipeline state
         self._pipeline_stage: PipelineStage = PipelineStage.IDLE
@@ -122,14 +124,22 @@ class SearchRescueAgent(LLMAgentBase):
     def update_knowledge(self, filtered_state: State) -> None:
         super().update_knowledge(filtered_state)
         agent_loc = filtered_state[self.agent_id]['location']
-        vision = self._capabilities.get('vision', 1) if self._capabilities else 1
+        vision_str = self._capabilities.get('vision', 'medium') if self._capabilities else 'medium'
+        vision = {'low': 1, 'medium': 2, 'high': 3}.get(vision_str, 2)
         self.area_tracker.update(agent_loc, vision_radius=vision)
 
     def decide_on_actions(self, filtered_state: State) -> Tuple[Optional[str], Dict]:
         self.update_knowledge(filtered_state)
 
         if not self._current_task:
-            return self._idle()
+            if self._use_planner and not self._received_planner_task:
+                # Waiting for planner to assign a task
+                return self._idle()
+            elif not self._use_planner:
+                # Self-assign a default task (no planner)
+                self.set_current_task('Explore all areas, find and rescue victims')
+            else:
+                return self._idle()
 
         # Infrastructure: carry retry, navigation
         action = self._run_infra(filtered_state)
@@ -167,7 +177,7 @@ class SearchRescueAgent(LLMAgentBase):
         if self._pipeline_stage == PipelineStage.PLANNING:
             return self.plan()
         if self._pipeline_stage == PipelineStage.REASONING:
-            return self._submit_reasoning()
+            return self.reason()
         if self._pipeline_stage == PipelineStage.EXECUTE:
             return self.execute()
         if self._pipeline_stage == PipelineStage.COMMUNICATION:
@@ -200,7 +210,7 @@ class SearchRescueAgent(LLMAgentBase):
             self._pipeline_stage = PipelineStage.PLANNING
             return self._advance_pipeline()
         
-        prompt = self.critic.get_critic_prompt({
+        prompt = self.critic_module.get_critic_prompt({
             'current_task': self._current_task,
             'last_action': self._last_action,
             'observation': self.WORLD_STATE,

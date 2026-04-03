@@ -15,6 +15,12 @@ __app = Flask(__name__)
 CORS(__app)
 _port = 3001
 
+
+def set_api_port(port: int) -> None:
+    """Override the MATRX API port (must be called before _run_api)."""
+    global _port
+    _port = port
+
 # states is a list of length '_current_tick' with a dictionary containing all states of that tick, indexed by agent_id
 __states = {}
 
@@ -1116,7 +1122,7 @@ def _run_api(verbose=False):
     _debug = verbose
 
     print("Initialized app:", __app)
-    api_thread = threading.Thread(target=_flask_thread)
+    api_thread = threading.Thread(target=_flask_thread, daemon=True)
     api_thread.start()
     return api_thread
 
