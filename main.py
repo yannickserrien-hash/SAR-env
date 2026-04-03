@@ -6,16 +6,21 @@ import pathlib
 import threading
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
-from engine.engine_planner import EnginePlanner
 from agents1.async_model_prompting import init_marble_pool, shutdown_marble_pool
 
 # Event set by SIGTERM/SIGINT handler to request graceful shutdown.
-# Passed into run_with_planner() so the main loop can check it each tick.
+# Passed into the main loop so it can check for shutdown each tick.
 shutdown_event = threading.Event()
 
 def _handle_sigterm(signum, frame):
     print(f"\n[main] Received signal {signum} — requesting graceful shutdown...")
     shutdown_event.set()
+    # Also signal MATRX API to stop (since normal run() checks this)
+    try:
+        from matrx.api import api as matrx_api
+        matrx_api._matrx_done = True
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     fld = os.getcwd()
@@ -68,6 +73,10 @@ if __name__ == "__main__":
     # See manual_plans.yaml for the expected format. Set to None to use LLM mode.
     manual_plans_file = None  # e.g. "manual_plans.yaml"
 
+    # When True, an EnginePlanner agent coordinates task assignments via messages.
+    # When False, agents self-assign tasks using their own planning module.
+    use_planner = True
+
     # Log directory (override with SAR_LOG_DIR env var for HPC)
     log_dir = os.environ.get('SAR_LOG_DIR', os.path.join(fld, 'logs'))
 
@@ -76,11 +85,27 @@ if __name__ == "__main__":
 
     builder = None
     vis_thread = None
-    planner = None
+    planner_brain = None
     iteration_history = []
 
+    # Initialize score.json with defaults early (planner needs path at init)
+    os.makedirs(log_dir, exist_ok=True)
+    score_file = os.path.join(log_dir, 'score.json')
+
     try:
-        builder, agents, total_victims = create_builder(
+        # Planner config (passed to WorldBuilder which creates the brain)
+        planner_config = {
+            'llm_model': planner_model,
+            'ticks_per_iteration': ticks_per_iteration,
+            'max_iterations': 50,
+            'score_file': score_file,
+            'include_human': include_human,
+            'api_base': api_base,
+            'manual_plans_file': manual_plans_file,
+            'planning_mode': planning_mode,
+        } if use_planner else None
+
+        builder, agents, total_victims, planner_brain = create_builder(
             condition=condition, name=name, agent_type=agent_type, folder=fld,
             num_rescue_agents=num_rescue_agents, include_human=include_human,
             api_base=api_base, agent_model=agent_model,
@@ -89,6 +114,7 @@ if __name__ == "__main__":
             comm_strategies=comm_strategies,
             world_preset=world_preset, world_seed=world_seed,
             enable_gui=enable_gui,
+            planner_config=planner_config, use_planner=use_planner,
         )
 
         # Configure MATRX API port before startup
@@ -107,9 +133,7 @@ if __name__ == "__main__":
         world = builder.get_world()
         print("Started world...")
 
-        # Initialize score.json with defaults
-        os.makedirs(log_dir, exist_ok=True)
-        score_file = os.path.join(log_dir, 'score.json')
+        # Write initial score.json
         with open(score_file, 'w') as f:
             json.dump({
                 'score': 0,
@@ -118,25 +142,10 @@ if __name__ == "__main__":
                 'total_victims': total_victims
             }, f, indent=2)
 
-        # Initialize EnginePlanner with LLM
-        planner = EnginePlanner(
-            max_iterations=50,
-            score_file=score_file,
-            llm_model=planner_model,
-            ticks_per_iteration=ticks_per_iteration,
-            include_human=include_human,
-            api_url=api_base,
-            manual_plans_file=manual_plans_file,
-        )
-
-        # Run with MARBLE-style planning loop
-        builder.api_info['matrx_paused'] = False
-        iteration_history = world.run_with_planner(
-            builder.api_info, planner, agents,
-            ticks_per_iteration=ticks_per_iteration,
-            include_human=include_human,
-            shutdown_event=shutdown_event,
-        )
+        # Run with normal MATRX loop (planner is a registered agent)
+        if not include_human:
+            builder.api_info['matrx_paused'] = False
+        world.run(builder.api_info)
 
         print("DONE!")
 
@@ -144,10 +153,10 @@ if __name__ == "__main__":
         print(f"[main] Simulation error: {e}", file=sys.stderr)
 
     finally:
-        # Save iteration history (from planner if available, else from run_with_planner return)
+        # Save iteration history from planner brain
         history = iteration_history
-        if not history and planner is not None:
-            history = planner.iteration_history
+        if planner_brain is not None and hasattr(planner_brain, 'iteration_history'):
+            history = list(planner_brain.iteration_history)
 
         if history:
             try:

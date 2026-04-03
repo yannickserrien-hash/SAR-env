@@ -68,7 +68,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                api_base="http://localhost:11434", agent_model='qwen3:8b',
                planning_mode='simple', agent_presets=None,
                capability_knowledge='informed', comm_strategies=None,
-               env_info=None, agent_starts=None):
+               env_info=None, agent_starts=None, use_planner=True):
     """
     Add agents to the world.
 
@@ -141,6 +141,7 @@ def add_agents(builder, condition, name, folder, agent_type='baseline',
                     capability_knowledge=capability_knowledge,
                     comm_strategy=comm_strategies[agent_nr],
                     env_info=env_info,
+                    use_planner=use_planner,
                 )
                 agents.append(brain)
                 print(f"[WorldBuilder] Using Agent '{agent_name}' (SearchRescueAgent, caps={caps})")
@@ -226,7 +227,8 @@ def create_builder(condition, name, folder, agent_type='baseline',
                    api_base="http://localhost:11434", agent_model='qwen3:8b',
                    planning_mode='simple', agent_presets=None,
                    capability_knowledge='informed', comm_strategies=None,
-                   world_preset='static', world_seed=None, enable_gui=True):
+                   world_preset='static', world_seed=None, enable_gui=True,
+                   planner_config=None, use_planner=True):
     # Set numpy's random generator
     np.random.seed(random_seed)
 
@@ -329,6 +331,24 @@ def create_builder(condition, name, folder, agent_type='baseline',
     # Agent start positions derived from drop zone
     agent_starts = _compute_agent_starts(dz.location, preset.grid_width)
 
+    # Register planner agent FIRST so it acts before rescue agents each tick
+    planner_brain = None
+    if use_planner and planner_config is not None:
+        from engine.engine_planner import EnginePlanner
+        planner_brain = EnginePlanner(
+            env_info=env_info,
+            **planner_config,
+        )
+        planner_sense = SenseCapability({None: np.inf})
+        builder.add_agent(
+            (0, 0), planner_brain,
+            team='planner', name='PlannerAgent',
+            sense_capability=planner_sense,
+            is_traversable=True,
+            visualize_opacity=0.0,
+            visualize_size=0.0,
+        )
+
     agents = add_agents(builder, condition, name, folder, agent_type,
                         num_rescue_agents=num_rescue_agents, include_human=include_human,
                         api_base=api_base, agent_model=agent_model,
@@ -337,9 +357,10 @@ def create_builder(condition, name, folder, agent_type='baseline',
                         capability_knowledge=capability_knowledge,
                         comm_strategies=comm_strategies,
                         env_info=env_info,
-                        agent_starts=agent_starts)
+                        agent_starts=agent_starts,
+                        use_planner=use_planner)
 
-    return builder, agents, total_victims
+    return builder, agents, total_victims, planner_brain
 
 
 class CollectableBlock(EnvObject):

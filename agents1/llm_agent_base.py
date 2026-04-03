@@ -84,6 +84,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         capability_knowledge: str = 'informed',
         comm_strategy: str = 'always_respond',
         env_info: Optional[EnvironmentInformation] = None,
+        use_planner: bool = True,
     ) -> None:
         super().__init__(slowdown, condition, name, folder)
 
@@ -92,6 +93,11 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._include_human = include_human
         self._partner_name = name
         self.teammates: set = set()
+
+        # ── Planner integration ───────────────────────────────────────────
+        self._use_planner = use_planner
+        self._planner_agent_id = 'PlannerAgent'
+        self._received_planner_task = False
 
         # ── Environment info ─────────────────────────────────────────────
         self.env_info: EnvironmentInformation = env_info or EnvironmentInformation()
@@ -206,7 +212,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
         self._current_task = task
         self._pending_future = None
         self._nav_target = None
-        self.planner.update_current_task(task)
+        self.planner.set_current_task(task)
         print(f'[{self.agent_id}] Task: {task}')
 
     def set_manual_task_decomposition(self, decomposition: str) -> None:
@@ -235,7 +241,73 @@ class LLMAgentBase(ArtificialBrain, Perception):
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
         self.update_world_belief(filtered_state)
-        self.communication.process_messages(self.received_messages)
+
+        # Separate planner protocol messages from peer messages
+        planner_msgs, peer_msgs = self._split_planner_messages(self.received_messages)
+        self._handle_planner_messages(planner_msgs)
+        self.communication.process_messages(peer_msgs)
+
+    # ── Planner message handling ────────────────────────────────────────
+
+    _PLANNER_MSG_TYPES = frozenset({'task_assignment', 'planner_answer'})
+
+    def _split_planner_messages(self, messages: list):
+        """Separate planner protocol messages from peer messages.
+
+        Returns (planner_msgs, peer_msgs).
+        """
+        planner_msgs = []
+        peer_msgs = []
+        for msg in messages:
+            content = msg.content if hasattr(msg, 'content') else msg
+            if (isinstance(content, dict)
+                    and content.get('type') in self._PLANNER_MSG_TYPES):
+                planner_msgs.append(msg)
+            else:
+                peer_msgs.append(msg)
+        return planner_msgs, peer_msgs
+
+    def _handle_planner_messages(self, msgs: list) -> None:
+        """Process planner protocol messages (task assignments, answers)."""
+        for msg in msgs:
+            content = msg.content if hasattr(msg, 'content') else msg
+            if not isinstance(content, dict):
+                continue
+
+            msg_type = content.get('type', '')
+
+            if msg_type == 'task_assignment':
+                task = content.get('task', '')
+                if task:
+                    self.set_current_task(task)
+                    self._received_planner_task = True
+
+                # Apply manual plan if included
+                plan = content.get('plan')
+                if plan:
+                    self.set_manual_task_decomposition(plan)
+
+                # Update SharedMemory with all task assignments
+                all_assignments = content.get('task_assignments')
+                if all_assignments and self.shared_memory:
+                    self.shared_memory.update(SM_TASK_ASSIGNMENTS, all_assignments)
+
+            elif msg_type == 'planner_answer':
+                answer = content.get('answer', '')
+                if answer:
+                    self.memory.update('planner_answer', answer)
+
+    def ask_planner(self, question: str, context: Optional[Dict] = None) -> None:
+        """Send a question to the planner agent via MATRX message."""
+        self.send_message(Message(
+            content={
+                'type': 'planner_question',
+                'question': question,
+                'context': context or {},
+            },
+            from_id=self.agent_id,
+            to_id=self._planner_agent_id,
+        ))
 
     def _run_infra(self, filtered_state: State) -> Optional[Tuple[str, Dict]]:
         """Handle infrastructure concerns only (no LLM polling).

@@ -306,7 +306,7 @@ def init_marble_pool(num_agents: int = 1, backend: Optional[str] = None) -> None
     global _executor
     if backend is not None:
         set_backend(backend)
-    workers = max(8, num_agents * 3)
+    workers = max(8, num_agents * 3 + 4)  # +4 for planner LLM calls
     _executor = ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix='llm_pool'
     )

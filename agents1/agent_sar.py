@@ -68,6 +68,7 @@ class SearchRescueAgent(LLMAgentBase):
         capability_knowledge: str = 'informed',
         comm_strategy: str = 'always_respond',
         env_info: Optional[EnvironmentInformation] = None,
+        use_planner: bool = True,
     ) -> None:
         super().__init__(
             slowdown=slowdown,
@@ -83,6 +84,7 @@ class SearchRescueAgent(LLMAgentBase):
             capability_knowledge=capability_knowledge,
             comm_strategy=comm_strategy,
             env_info=env_info,
+            use_planner=use_planner,
         )
         self._strategy = strategy if strategy in REASONING_STRATEGIES else 'react'
         self.area_tracker = AreaExplorationTracker(self.env_info.get_area_cells())
@@ -130,7 +132,14 @@ class SearchRescueAgent(LLMAgentBase):
         self.update_knowledge(filtered_state)
 
         if not self._current_task:
-            return self._idle()
+            if self._use_planner and not self._received_planner_task:
+                # Waiting for planner to assign a task
+                return self._idle()
+            elif not self._use_planner:
+                # Self-assign a default task (no planner)
+                self.set_current_task('Explore all areas, find and rescue victims')
+            else:
+                return self._idle()
 
         # Infrastructure: carry retry, navigation
         action = self._run_infra(filtered_state)
