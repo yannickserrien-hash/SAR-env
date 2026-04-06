@@ -1,47 +1,13 @@
 """
 Unified LLM interface — single execution path for all LLM calls in the codebase.
-
-Supports two backends for local Ollama inference:
-  - "ollama_sdk": Uses the official Ollama Python SDK (ollama.Client.chat)
-  - "requests":   Direct HTTP calls to Ollama's OpenAI-compatible endpoint
-
-Uses a ThreadPoolExecutor so that LLM calls from multiple agents don't block
-each other. Each tick an agent submits a call and polls for the result.
-
-Usage (async, for agents):
-    from agents1.async_model_prompting import submit_llm_call, get_llm_result
-
-    future = submit_llm_call(
-        "ollama/llama3", messages,
-        max_token_num=512,
-        tools=tool_schemas,
-        tool_choice='auto',
-        api_base="http://localhost:11434",
-    )
-    result = get_llm_result(future)  # None if still running, List[Message] if done
-
-Usage (sync, for EnginePlanner / memory):
-    from agents1.async_model_prompting import call_llm_sync
-
-    text = call_llm_sync(
-        llm_model="ollama/qwen3:8b",
-        system_prompt="You are helpful.",
-        user_prompt="What should the agents do?",
-        api_base="http://localhost:11434",
-    )
-
-Backend selection:
-    from agents1.async_model_prompting import set_backend
-    set_backend("ollama_sdk")   # default
-    set_backend("requests")     # direct HTTP
-
-    # Or via environment variable:  LLM_BACKEND=requests
-    # Or at startup:  init_marble_pool(num_agents, backend="requests")
+    
 """
 
 import json
 import logging
 import os
+import re
+import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -55,6 +21,14 @@ try:
 except ImportError:
     _ollama_sdk = None
 
+try:
+    import torch as _torch
+    from transformers import AutoModelForCausalLM as _AutoModel
+    from transformers import AutoTokenizer as _AutoTokenizer
+    _transformers_available = True
+except ImportError:
+    _transformers_available = False
+
 logger = logging.getLogger('async_model_prompting')
 
 # ---------------------------------------------------------------------------
@@ -65,11 +39,12 @@ _backend: str = os.environ.get("LLM_BACKEND", "ollama_sdk")
 
 
 def set_backend(backend: str) -> None:
-    """Set the LLM backend. Options: 'ollama_sdk', 'requests'."""
+    """Set the LLM backend. Options: 'ollama_sdk', 'requests', 'transformers'."""
     global _backend
-    if backend not in ("ollama_sdk", "requests"):
+    if backend not in ("ollama_sdk", "requests", "transformers"):
         raise ValueError(
-            f"Unknown backend: {backend!r}. Use 'ollama_sdk' or 'requests'."
+            f"Unknown backend: {backend!r}. "
+            "Use 'ollama_sdk', 'requests', or 'transformers'."
         )
     _backend = backend
     logger.info("LLM backend set to: %s", backend)
@@ -249,6 +224,138 @@ def _completion_requests(
 
 
 # ---------------------------------------------------------------------------
+# Backend: In-process HuggingFace Transformers
+# ---------------------------------------------------------------------------
+
+class _TransformersModel:
+    """Singleton that holds a single model + tokenizer, shared by all agents."""
+
+    _instance: Optional["_TransformersModel"] = None
+    _init_lock = threading.Lock()
+
+    def __init__(self, model_name: str) -> None:
+        logger.info("Loading transformers model: %s (this may take a moment)", model_name)
+        self.tokenizer = _AutoTokenizer.from_pretrained(model_name)
+        self.model = _AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=_torch.bfloat16,
+            device_map="auto",
+        )
+        self.model.eval()
+        self.generate_lock = threading.Lock()
+        logger.info("Model %s loaded successfully", model_name)
+
+    @classmethod
+    def get_instance(cls, model_name: str) -> "_TransformersModel":
+        if cls._instance is None:
+            with cls._init_lock:
+                if cls._instance is None:
+                    cls._instance = cls(model_name)
+        return cls._instance
+
+
+def _parse_qwen3_tool_calls(raw_output: str):
+    """Parse Qwen3 tool-call output into (content, tool_calls).
+
+    Qwen3 emits tool calls as:
+        <tool_call>{"name": "FuncName", "arguments": {...}}</tool_call>
+
+    Returns (content_str_or_None, list_of_ToolCall_or_None).
+    """
+    # Strip any <think>...</think> blocks
+    text = re.sub(r"<think>.*?</think>", "", raw_output, flags=re.DOTALL).strip()
+
+    tool_call_pattern = re.compile(
+        r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL
+    )
+    matches = tool_call_pattern.findall(text)
+
+    if not matches:
+        return text or None, None
+
+    tool_calls = []
+    for i, match in enumerate(matches):
+        try:
+            parsed = json.loads(match)
+            fn_name = parsed.get("name", "")
+            fn_args = parsed.get("arguments", {})
+            args_str = json.dumps(fn_args) if isinstance(fn_args, dict) else str(fn_args)
+            tool_calls.append(_ToolCall(
+                function=_Function(name=fn_name, arguments=args_str),
+                id=f"call_{i}",
+            ))
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning("Failed to parse tool call JSON: %s — %s", match[:200], e)
+            return text or None, None
+
+    # Content is everything outside <tool_call> blocks
+    content = tool_call_pattern.sub("", text).strip() or None
+    return content, tool_calls if tool_calls else None
+
+
+def _completion_transformers(
+    model: str,
+    messages: list,
+    max_token_num: int,
+    temperature: float,
+    tools: Optional[list],
+    tool_choice: Optional[str],
+    api_base: Optional[str],
+) -> List[_Message]:
+    if not _transformers_available:
+        raise ImportError(
+            "transformers and torch packages required for 'transformers' backend. "
+            "Install with: pip install transformers torch accelerate"
+        )
+
+    mgr = _TransformersModel.get_instance(model)
+
+    # Build prompt using Qwen3's chat template (natively supports tools)
+    template_kwargs = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+    if tools:
+        template_kwargs["tools"] = tools
+
+    text = mgr.tokenizer.apply_chat_template(messages, **template_kwargs)
+    inputs = mgr.tokenizer(text, return_tensors="pt").to(mgr.model.device)
+
+    # Build generate kwargs
+    gen_kwargs = {
+        "max_new_tokens": max_token_num,
+    }
+    if temperature > 0:
+        gen_kwargs["do_sample"] = True
+        gen_kwargs["temperature"] = temperature
+    else:
+        gen_kwargs["do_sample"] = False
+
+    # Serialize GPU inference
+    with mgr.generate_lock:
+        output_ids = mgr.model.generate(**inputs, **gen_kwargs)
+
+    # Decode only the generated tokens
+    generated = output_ids[0][inputs["input_ids"].shape[1]:]
+    raw_output = mgr.tokenizer.decode(generated, skip_special_tokens=False)
+
+    # Strip EOS tokens for cleaner output
+    for tok in ["<|endoftext|>", "<|im_end|>"]:
+        raw_output = raw_output.replace(tok, "")
+    raw_output = raw_output.strip()
+
+    # Parse tool calls if tools were provided
+    if tools:
+        content, tool_calls = _parse_qwen3_tool_calls(raw_output)
+    else:
+        content = raw_output or None
+        tool_calls = None
+
+    return [_Message(content=content, tool_calls=tool_calls)]
+
+
+# ---------------------------------------------------------------------------
 # Core LLM completion dispatcher (with retry)
 # ---------------------------------------------------------------------------
 
@@ -273,6 +380,10 @@ def _llm_completion(
         return _completion_requests(
             model, messages, max_token_num, temperature, tools, tool_choice, api_base
         )
+    elif _backend == "transformers":
+        return _completion_transformers(
+            model, messages, max_token_num, temperature, tools, tool_choice, api_base
+        )
     else:
         raise ValueError(f"Unknown LLM backend: {_backend!r}")
 
@@ -293,15 +404,21 @@ def _get_executor() -> ThreadPoolExecutor:
     return _executor
 
 
-def init_marble_pool(num_agents: int = 1, backend: Optional[str] = None) -> None:
+def init_marble_pool(
+    num_agents: int = 1,
+    backend: Optional[str] = None,
+    preload_model: Optional[str] = None,
+) -> None:
     """Resize the executor pool based on the number of agents.
 
     Call once at startup (optional). Workers = max(8, num_agents * 3).
     Replaces any existing pool.
 
     Args:
-        num_agents: Number of concurrent agents.
-        backend:    Optionally set the LLM backend ('ollama_sdk' or 'requests').
+        num_agents:    Number of concurrent agents.
+        backend:       Optionally set the LLM backend.
+        preload_model: For 'transformers' backend, eagerly load this model at
+                       startup instead of on first inference call.
     """
     global _executor
     if backend is not None:
@@ -310,6 +427,8 @@ def init_marble_pool(num_agents: int = 1, backend: Optional[str] = None) -> None
     _executor = ThreadPoolExecutor(
         max_workers=workers, thread_name_prefix='llm_pool'
     )
+    if _backend == "transformers" and preload_model:
+        _TransformersModel.get_instance(preload_model)
 
 
 def shutdown_marble_pool() -> None:

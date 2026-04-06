@@ -16,6 +16,7 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
+from helpers.navigation_helpers import apply_navigation
 from matrx.agents.agent_utils.state import State
 from matrx.messages.message import Message
 
@@ -366,7 +367,7 @@ class SearchRescueAgent(LLMAgentBase):
         self.memory.update('action', {'action': action_name, 'args': kwargs})
         self._last_action = {'name': action_name, 'args': kwargs}
 
-        result = self._apply_navigation(action_name, kwargs)
+        result = apply_navigation(action_name, kwargs, navigator=self.navigator, state_tracker=self.state_tracker, env_info=self.env_info, memory=self.memory)
         self._pipeline_stage = PipelineStage.IDLE
         return result
 

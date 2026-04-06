@@ -8,26 +8,10 @@ from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from agents1.async_model_prompting import init_marble_pool, shutdown_marble_pool
 
-# Event set by SIGTERM/SIGINT handler to request graceful shutdown.
-# Passed into the main loop so it can check for shutdown each tick.
-shutdown_event = threading.Event()
-
-def _handle_sigterm(signum, frame):
-    print(f"\n[main] Received signal {signum} — requesting graceful shutdown...")
-    shutdown_event.set()
-    # Also signal MATRX API to stop (since normal run() checks this)
-    try:
-        from matrx.api import api as matrx_api
-        matrx_api._matrx_done = True
-    except Exception:
-        pass
-
 if __name__ == "__main__":
     fld = os.getcwd()
 
     # Register signal handlers for SLURM preemption / job timeout
-    signal.signal(signal.SIGTERM, _handle_sigterm)
-    signal.signal(signal.SIGINT, _handle_sigterm)
 
     # Configuration
     condition = "normal"
@@ -36,15 +20,17 @@ if __name__ == "__main__":
     ticks_per_iteration = 1200  # 1200 ticks * 0.1s/tick = 120 seconds = 2 minutes
     num_rescue_agents = 2       # Number of LLM-based RescueAgents (1-5)
     include_human = False        # Whether to add a keyboard-controlled human agent
-    enable_gui = True            # Set to False for headless runs (e.g. Delft Blue)
-    planner_model = 'qwen3:8b'  # Larger model for the EnginePlanner (main brain)
-    agent_model = 'qwen3:8b'    # Model for individual rescue agents
 
-    # LLM server configuration
-    # Local Ollama: api_base = "http://localhost:11434"
-    # HPC (vLLM):   api_base = "http://localhost:8000", llm_backend = 'requests',
-    #               model names must match vLLM's --served-model-name
-    api_base = "http://localhost:11434"
+    # ---- Deployment mode ----
+    # False = local development (Ollama + GUI)
+    # True  = HPC / headless (in-process transformers, no server needed)
+    hpc_mode = False
+
+    enable_gui = not hpc_mode
+    llm_backend = 'transformers' if hpc_mode else 'ollama_sdk'
+    api_base = None if hpc_mode else "http://localhost:11434"
+    planner_model = 'Qwen/Qwen3-8B' if hpc_mode else 'qwen3:8b'
+    agent_model = 'Qwen/Qwen3-8B' if hpc_mode else 'qwen3:8b'
 
     # Server ports (change to avoid conflicts when running multiple jobs on one node)
     api_port = 3001         # MATRX API server port
@@ -62,8 +48,8 @@ if __name__ == "__main__":
     # Available: 'always_respond', 'busy_aware'
     comm_strategies = ['always_respond', 'always_respond']
 
-    # LLM backend: 'ollama_sdk' (Ollama Python SDK) or 'requests' (direct HTTP)
-    llm_backend = 'ollama_sdk'
+    # LLM backend is set by hpc_mode above. Override here if needed:
+    # llm_backend = 'ollama_sdk'  # 'ollama_sdk' | 'requests' | 'transformers'
 
     # World preset: 'static' (current world), 'preset2' (2 houses), 'preset3' (2 big houses), 'random'
     world_preset = 'preset2'
@@ -75,13 +61,16 @@ if __name__ == "__main__":
 
     # When True, an EnginePlanner agent coordinates task assignments via messages.
     # When False, agents self-assign tasks using their own planning module.
-    use_planner = True
+    use_planner = False
 
     # Log directory (override with SAR_LOG_DIR env var for HPC)
     log_dir = os.environ.get('SAR_LOG_DIR', os.path.join(fld, 'logs'))
 
     # Scale LLM thread pool for the number of agents
-    init_marble_pool(num_rescue_agents, backend=llm_backend)
+    init_marble_pool(
+        num_rescue_agents, backend=llm_backend,
+        preload_model=agent_model if hpc_mode else None,
+    )
 
     builder = None
     vis_thread = None

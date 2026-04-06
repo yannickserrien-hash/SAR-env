@@ -91,9 +91,8 @@ class ShortTermMemory(BaseMemory):
             f"{json.dumps(memory, default=str)}\n\n"        )
 
         try:
-            llm_model = f"ollama/{self.llm_model}" if not self.llm_model.startswith("ollama/") else self.llm_model
             response = call_llm_sync(
-                llm_model=llm_model,
+                llm_model=self.llm_model,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 api_base=self._api_url,
