@@ -51,8 +51,8 @@ def execute_action(
 
     # Extract task_completing before dispatching (falls back to defaults)
     task_completing = args.pop('task_completing', '') or _DEFAULT_TASK_COMPLETING.get(name, '')
-    print(f"{log_prefix}Dispatching action '{name}' with args {args} and partner '{args.pop('partner_id', '')}'")
-    
+    print(f"{log_prefix}Dispatching action '{name}' with args {args} and partner '{args.get('partner_id', '')}'")
+
     # ── Movement ──────────────────────────────────────────────────────────
     if name in _MOVE_ACTIONS:
         return name, {}, task_completing

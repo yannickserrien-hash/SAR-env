@@ -3,10 +3,12 @@ import sys
 import json
 import signal
 import pathlib
+import time
 import threading
 from worlds1.WorldBuilder import create_builder
 from loggers.OutputLogger import output_logger
 from agents1.async_model_prompting import init_marble_pool, shutdown_marble_pool
+from metrics.simulation_metrics import SimulationMetrics
 
 if __name__ == "__main__":
     fld = os.getcwd()
@@ -75,11 +77,14 @@ if __name__ == "__main__":
     builder = None
     vis_thread = None
     planner_brain = None
+    agents = []
     iteration_history = []
 
     # Initialize score.json with defaults early (planner needs path at init)
     os.makedirs(log_dir, exist_ok=True)
     score_file = os.path.join(log_dir, 'score.json')
+
+    start_time = time.time()
 
     try:
         # Planner config (passed to WorldBuilder which creates the brain)
@@ -142,26 +147,44 @@ if __name__ == "__main__":
         print(f"[main] Simulation error: {e}", file=sys.stderr)
 
     finally:
-        # Save iteration history from planner brain
-        history = iteration_history
-        if planner_brain is not None and hasattr(planner_brain, 'iteration_history'):
-            history = list(planner_brain.iteration_history)
-
-        if history:
+        # Save final iteration history (planner also checkpoints every 1000 ticks)
+        if planner_brain is not None and hasattr(planner_brain, '_save_checkpoint'):
             try:
-                os.makedirs(log_dir, exist_ok=True)
-                history_file = os.path.join(log_dir, 'iteration_history.json')
-                with open(history_file, 'w') as f:
-                    json.dump([{
-                        'iteration': d.iteration,
-                        'task_assignments': d.task_assignments,
-                        'summary': d.summary,
-                        'score': d.score,
-                        'block_hit_rate': d.block_hit_rate
-                    } for d in history], f, indent=2)
-                print(f"Saved iteration history to {history_file}")
+                planner_brain._save_checkpoint()
+                print(f"Saved final iteration history checkpoint")
             except Exception as e:
-                print(f"Failed to save iteration history: {e}", file=sys.stderr)
+                print(f"Failed to save final checkpoint: {e}", file=sys.stderr)
+
+        # Aggregate and save comprehensive metrics
+        try:
+            sim_metrics = SimulationMetrics()
+            it_history = list(planner_brain.iteration_history) if planner_brain and hasattr(planner_brain, 'iteration_history') else []
+            report = sim_metrics.aggregate(
+                agents=agents if agents else [],
+                planner=planner_brain,
+                score_file=score_file,
+                start_time=start_time,
+                config={
+                    'agent_type': agent_type,
+                    'num_rescue_agents': num_rescue_agents,
+                    'planning_mode': planning_mode,
+                    'planner_model': planner_model,
+                    'agent_model': agent_model,
+                    'world_preset': world_preset,
+                    'world_seed': world_seed,
+                    'agent_presets': agent_presets,
+                    'capability_knowledge': capability_knowledge,
+                    'comm_strategies': comm_strategies,
+                    'ticks_per_iteration': ticks_per_iteration,
+                    'use_planner': use_planner,
+                },
+                iteration_history=it_history,
+            )
+            metrics_path = os.path.join(log_dir, 'simulation_metrics.json')
+            sim_metrics.save(metrics_path, report)
+            print(f"Saved simulation metrics to {metrics_path}")
+        except Exception as e:
+            print(f"[main] Failed to save simulation metrics: {e}", file=sys.stderr)
 
         # Shut down visualization
         if enable_gui and vis_thread is not None:

@@ -16,6 +16,7 @@ polled each tick in decide_on_action.
 import json
 import logging
 import os
+import time
 from collections import deque
 from typing import Any, Dict, List, Optional
 
@@ -127,9 +128,12 @@ class EnginePlanner(ArtificialAgentBrain):
         self._phase = NEEDS_PLANNING
         self._iteration = 0
         self._ticks_in_iteration = 0
+        self._total_ticks = 0
         self.iteration_history: deque = deque(maxlen=self.max_iterations)
         self._iteration_data: Optional[IterationData] = None
         self._last_summary = ''
+        self._checkpoint_interval = 1000  # Save metrics every N ticks
+        self._last_checkpoint_tick = 0
 
         # ── Async LLM futures ────────────────────────────────────────────
         self._planning_future = None
@@ -164,6 +168,7 @@ class EnginePlanner(ArtificialAgentBrain):
 
     def decide_on_action(self, state):
         """Called every tick by MATRX. Runs the iteration state machine."""
+        self._total_ticks += 1
         # Cache world state for LLM prompts
         self._world_state = state
 
@@ -181,7 +186,37 @@ class EnginePlanner(ArtificialAgentBrain):
         if not self._should_stop:
             self._run_state_machine(state)
 
+        # Periodic checkpoint for HPC resilience
+        if self._total_ticks - self._last_checkpoint_tick >= self._checkpoint_interval:
+            self._save_checkpoint()
+            self._last_checkpoint_tick = self._total_ticks
+
         return None, {}  # Always Idle
+
+    def _save_checkpoint(self) -> None:
+        """Save iteration history to disk for crash resilience."""
+        if not self.iteration_history:
+            return
+        log_dir = os.path.dirname(self.score_file)
+        os.makedirs(log_dir, exist_ok=True)
+        checkpoint = {
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'total_ticks': self._total_ticks,
+            'current_iteration': self._iteration,
+            'phase': self._phase,
+            'iterations': [{
+                'iteration': d.iteration,
+                'task_assignments': d.task_assignments,
+                'summary': d.summary,
+                'score': d.score,
+            } for d in self.iteration_history],
+        }
+        path = os.path.join(log_dir, 'iteration_history.json')
+        try:
+            with open(path, 'w') as f:
+                json.dump(checkpoint, f, indent=2)
+        except Exception as e:
+            logger.warning('Failed to save checkpoint: %s', e)
 
     # ------------------------------------------------------------------
     # Agent discovery

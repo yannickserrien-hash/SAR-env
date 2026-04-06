@@ -196,6 +196,11 @@ class CommunicationModule:
         result.extend(recent)
         return result
 
+    @property
+    def all_messages_raw(self) -> List[dict]:
+        """All processed messages (for metrics export)."""
+        return list(self._messages)
+
     def has_pending_ask_help(self, from_agent: str) -> bool:
         """Check if there's a recent ask_help from `from_agent`.
 

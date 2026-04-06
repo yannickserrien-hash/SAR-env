@@ -112,6 +112,20 @@ def _retry_with_backoff(retries: int = 5, base_wait_time: float = 1.0):
 # Backend: Ollama Python SDK
 # ---------------------------------------------------------------------------
 
+_ollama_clients: Dict[Optional[str], Any] = {}
+_ollama_clients_lock = threading.Lock()
+
+
+def _get_ollama_client(api_base: Optional[str]):
+    """Return a cached Ollama Client for the given api_base."""
+    with _ollama_clients_lock:
+        if api_base not in _ollama_clients:
+            _ollama_clients[api_base] = (
+                _ollama_sdk.Client(host=api_base) if api_base else _ollama_sdk.Client()
+            )
+        return _ollama_clients[api_base]
+
+
 def _completion_ollama_sdk(
     model: str,
     messages: list,
@@ -126,7 +140,7 @@ def _completion_ollama_sdk(
             "ollama package required for 'ollama_sdk' backend. "
             "Install with: pip install ollama>=0.4.0"
         )
-    client = _ollama_sdk.Client(host=api_base) if api_base else _ollama_sdk.Client()
+    client = _get_ollama_client(api_base)
 
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -437,6 +451,12 @@ def shutdown_marble_pool() -> None:
     if _executor is not None:
         _executor.shutdown(wait=True, cancel_futures=True)
         _executor = None
+    # Close cached Ollama clients to avoid unclosed socket warnings
+    with _ollama_clients_lock:
+        for client in _ollama_clients.values():
+            if hasattr(client, '_client'):
+                client._client.close()
+        _ollama_clients.clear()
 
 
 # ---------------------------------------------------------------------------

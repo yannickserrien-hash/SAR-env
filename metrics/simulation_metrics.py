@@ -272,7 +272,7 @@ class SimulationMetrics:
                     'task_assignments': d.task_assignments,
                     'summary': d.summary,
                     'score': d.score,
-                    'block_hit_rate': d.block_hit_rate,
+                    'block_hit_rate': getattr(d, 'block_hit_rate', 0.0),
                 } if hasattr(d, 'iteration') else d
                 for d in iteration_history
             ]

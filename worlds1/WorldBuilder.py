@@ -242,11 +242,13 @@ def create_builder(condition, name, folder, agent_type='baseline',
 
     # Create the collection goal with dynamic drop zone
     dz = preset.drop_zone
+    score_file = planner_config.get('score_file') if planner_config else None
     goal = CollectionGoal(
         max_nr_ticks=np.inf,
         drop_zone_location=dz.location,
         drop_zone_height=dz.height,
         total_victims=total_victims,
+        score_file=score_file,
     )
 
     # Create the world builder
@@ -400,13 +402,14 @@ class CollectionGoal(WorldGoal):
     The goal for world which determines when the simulator should stop.
     '''
     def __init__(self, max_nr_ticks, drop_zone_location=(23, 8),
-                 drop_zone_height=8, total_victims=8):
+                 drop_zone_height=8, total_victims=8, score_file=None):
         super().__init__()
         self.max_nr_ticks = max_nr_ticks
         self._dz_x = drop_zone_location[0]
         self._dz_y_min = drop_zone_location[1]
         self._dz_y_max = drop_zone_location[1] + drop_zone_height - 1
         self._total_victims = total_victims
+        self._score_file = score_file or os.path.join('logs', 'score.json')
         self.__drop_off= {}
         self.__drop_off_zone = {}
         self.__progress = 0
@@ -453,9 +456,8 @@ class CollectionGoal(WorldGoal):
             'victims_rescued': len(getattr(self, '_scored_victims', set())),
             'total_victims': self._total_victims
         }
-        score_file = os.path.join('logs', 'score.json')
-        os.makedirs('logs', exist_ok=True)
-        with open(score_file, 'w') as f:
+        os.makedirs(os.path.dirname(self._score_file), exist_ok=True)
+        with open(self._score_file, 'w') as f:
             json.dump(score_data, f, indent=2)
 
     def __find_drop_off_locations(self, grid_world):

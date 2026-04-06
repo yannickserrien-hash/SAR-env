@@ -37,6 +37,7 @@ from helpers.logic_module import ActionValidator
 from brains1.ArtificialBrain import ArtificialBrain
 from memory.base_memory import BaseMemory
 from memory.shared_memory import SharedMemory
+from metrics.agent_metrics import AgentMetricsTracker
 from worlds1.environment_info import EnvironmentInformation
 
 logger = logging.getLogger('LLMAgentBase')
@@ -141,6 +142,10 @@ class LLMAgentBase(ArtificialBrain, Perception):
         # ── Cooperative carry autopilot ─────────────────────────────────────
         self._carry_autopilot: Optional[Dict] = None  # {'victim_id', 'destination', 'role'}
 
+        # ── Metrics ────────────────────────────────────────────────────────
+        self.metrics: Optional[AgentMetricsTracker] = None  # initialized in initialize()
+        self._tick_count: int = 0
+
         # ── World state (populated each tick by _tick_setup) ───────────────
         self.WORLD_STATE: Dict = {}
 
@@ -152,6 +157,7 @@ class LLMAgentBase(ArtificialBrain, Perception):
             action_set=self.action_set,
             algorithm=Navigator.A_STAR_ALGORITHM,
         )
+        self.metrics = AgentMetricsTracker(agent_id=self.agent_id)
         self.init_global_state()
         self.communication = CommunicationModule(
             agent_id=self.agent_id,
@@ -236,16 +242,45 @@ class LLMAgentBase(ArtificialBrain, Perception):
 
     def update_knowledge(self, filtered_state: State) -> None:
         """Update state tracker and perception. Call at the top of ``decide_on_actions``."""
+        self._tick_count += 1
         self._state_tracker.update(self.state_for_navigation)
         self.WORLD_STATE = self.percept_state(
             filtered_state, agent_id=self.agent_id, teammates=self.teammates
         )
         self.update_world_belief(filtered_state)
 
+        # Record location for metrics
+        if self.metrics:
+            loc = self.WORLD_STATE.get('agent', {}).get('location')
+            if loc:
+                self.metrics.record_location(self._tick_count, loc[0], loc[1])
+
+        # Detect newly visible victims for metrics
+        if self.metrics:
+            known_ids = {v['victim_id'] for v in self.metrics.victims_found}
+            for v in self.WORLD_STATE.get('victims', []):
+                vid = v.get('obj_id', '')
+                if vid and vid not in known_ids:
+                    severity = 'critical' if 'critical' in vid else 'mild'
+                    vloc = v.get('location', (0, 0))
+                    self.metrics.record_victim_found(self._tick_count, vid, severity, tuple(vloc))
+
         # Separate planner protocol messages from peer messages
         planner_msgs, peer_msgs = self._split_planner_messages(self.received_messages)
         self._handle_planner_messages(planner_msgs)
         self.communication.process_messages(peer_msgs)
+
+        # Record received messages for metrics
+        if self.metrics:
+            for msg in peer_msgs:
+                content = msg.content if hasattr(msg, 'content') else msg
+                if isinstance(content, dict):
+                    self.metrics.record_message_received(
+                        self._tick_count,
+                        getattr(msg, 'from_id', ''),
+                        content.get('message_type', 'message'),
+                        content.get('text', ''),
+                    )
 
     # ── Planner message handling ────────────────────────────────────────
 
@@ -417,7 +452,9 @@ class LLMAgentBase(ArtificialBrain, Perception):
             'role': 'partner',
         }
         self._pending_future = None  # cancel any pending LLM call
-        return navigate_to(dest, navigator=self._navigator, state_tracker=self._state_tracker)
+        nav_target, action = navigate_to(dest, navigator=self._navigator, state_tracker=self._state_tracker)
+        self._nav_target = nav_target
+        return action
 
     def _handle_navigation_tick(self) -> Optional[Tuple[str, Dict]]:
         """Continue A* navigation if a target is set."""
@@ -439,6 +476,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
         if result.valid:
             return None
         self.memory.update("action_failure", result.feedback)
+        if self.metrics:
+            self.metrics.record_validation_failure(self._tick_count, name, result.feedback)
         return self._idle()
 
     # ── LLM submission ────────────────────────────────────────────────────
@@ -450,6 +489,8 @@ class LLMAgentBase(ArtificialBrain, Perception):
         tool_choice: str = 'auto',
     ) -> None:
         """Submit an async LLM call."""
+        if self.metrics:
+            self.metrics.record_llm_call_start()
         self._pending_future = submit_llm_call(
             llm_model=self._llm_model,
             messages=messages,

@@ -187,6 +187,8 @@ class SearchRescueAgent(LLMAgentBase):
         return self._idle()
 
     def _on_llm_result(self, result) -> Tuple[Optional[str], Dict]:
+        if self.metrics:
+            self.metrics.record_llm_call_end()
         if self._pipeline_stage == PipelineStage.CRITIC:
             return self._handle_critic_result(result)
         if self._pipeline_stage == PipelineStage.PLANNING:
@@ -338,6 +340,8 @@ class SearchRescueAgent(LLMAgentBase):
             from_id=self.agent_id,
             to_id=target,
         ))
+        if self.metrics:
+            self.metrics.record_message_sent(self._tick_count, send_to, message_type, text)
 
         # Auto-announce: if responding to a help request, broadcast it
         if message_type == 'help' and target is not None:
@@ -367,7 +371,13 @@ class SearchRescueAgent(LLMAgentBase):
         self.memory.update('action', {'action': action_name, 'args': kwargs})
         self._last_action = {'name': action_name, 'args': kwargs}
 
-        result = apply_navigation(action_name, kwargs, navigator=self.navigator, state_tracker=self.state_tracker, env_info=self.env_info, memory=self.memory)
+        if self.metrics:
+            loc = self.WORLD_STATE.get('agent', {}).get('location', (0, 0))
+            self.metrics.record_action(self._tick_count, action_name, kwargs, tuple(loc))
+
+        action, updates = apply_navigation(action_name, kwargs, navigator=self._navigator, state_tracker=self._state_tracker, env_info=self.env_info, memory=self.memory)
+        if 'nav_target' in updates:
+            self._nav_target = updates['nav_target']
         self._pipeline_stage = PipelineStage.IDLE
-        return result
+        return action
 
