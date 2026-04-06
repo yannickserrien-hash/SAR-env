@@ -245,15 +245,22 @@ class _TransformersModel:
     """Singleton that holds a single model + tokenizer, shared by all agents."""
 
     _instance: Optional["_TransformersModel"] = None
+    _loaded_model_name: Optional[str] = None
     _init_lock = threading.Lock()
 
     def __init__(self, model_name: str) -> None:
         logger.info("Loading transformers model: %s (this may take a moment)", model_name)
-        self.tokenizer = _AutoTokenizer.from_pretrained(model_name)
+        # Use local_files_only when model_name is a local directory path
+        is_local = os.path.isdir(model_name)
+        load_kwargs = {"local_files_only": True} if is_local else {}
+        if is_local:
+            logger.info("Detected local model path, loading with local_files_only=True")
+        self.tokenizer = _AutoTokenizer.from_pretrained(model_name, **load_kwargs)
         self.model = _AutoModel.from_pretrained(
             model_name,
             torch_dtype=_torch.bfloat16,
             device_map="auto",
+            **load_kwargs,
         )
         self.model.eval()
         self.generate_lock = threading.Lock()
@@ -265,6 +272,12 @@ class _TransformersModel:
             with cls._init_lock:
                 if cls._instance is None:
                     cls._instance = cls(model_name)
+                    cls._loaded_model_name = model_name
+        elif cls._loaded_model_name and model_name != cls._loaded_model_name:
+            logger.warning(
+                "Requested model '%s' but singleton already loaded '%s'. "
+                "Using the loaded model.", model_name, cls._loaded_model_name,
+            )
         return cls._instance
 
 
@@ -333,9 +346,6 @@ def _completion_transformers(
     if tools:
         template_kwargs["tools"] = tools
 
-    text = mgr.tokenizer.apply_chat_template(messages, **template_kwargs)
-    inputs = mgr.tokenizer(text, return_tensors="pt").to(mgr.model.device)
-
     # Build generate kwargs
     gen_kwargs = {
         "max_new_tokens": max_token_num,
@@ -346,8 +356,18 @@ def _completion_transformers(
     else:
         gen_kwargs["do_sample"] = False
 
-    # Serialize GPU inference
+    # Serialize tokenization + GPU inference together for thread safety
     with mgr.generate_lock:
+        try:
+            text = mgr.tokenizer.apply_chat_template(messages, **template_kwargs)
+        except TypeError as e:
+            if "enable_thinking" in str(e):
+                logger.warning("Tokenizer doesn't support enable_thinking; retrying without it")
+                template_kwargs.pop("enable_thinking")
+                text = mgr.tokenizer.apply_chat_template(messages, **template_kwargs)
+            else:
+                raise
+        inputs = mgr.tokenizer(text, return_tensors="pt").to(mgr.model.device)
         output_ids = mgr.model.generate(**inputs, **gen_kwargs)
 
     # Decode only the generated tokens

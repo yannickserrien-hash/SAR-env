@@ -31,8 +31,9 @@ if __name__ == "__main__":
     enable_gui = not hpc_mode
     llm_backend = 'transformers' if hpc_mode else 'ollama_sdk'
     api_base = None if hpc_mode else "http://localhost:11434"
-    planner_model = 'Qwen/Qwen3-8B' if hpc_mode else 'qwen3:8b'
-    agent_model = 'Qwen/Qwen3-8B' if hpc_mode else 'qwen3:8b'
+    _hpc_model = os.environ.get('SAR_MODEL_PATH', 'Qwen/Qwen3-8B')
+    planner_model = _hpc_model if hpc_mode else 'qwen3:8b'
+    agent_model = _hpc_model if hpc_mode else 'qwen3:8b'
 
     # Server ports (change to avoid conflicts when running multiple jobs on one node)
     api_port = 3001         # MATRX API server port
